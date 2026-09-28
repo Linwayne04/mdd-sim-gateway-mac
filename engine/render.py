@@ -32,6 +32,13 @@ from jinja2 import Environment, FileSystemLoader
 
 TPL_DIR = os.environ.get("MDD_TPL", "/opt/mdd-sim-gateway/templates")
 CFG_PATH = os.environ.get("MDD_INSTANCE", "/config/instance.json")
+# mdd-sim-gateway macOS port: per-line filesystem prefix. Unset (Linux container) keeps
+# every historical absolute path byte-identical; the native supervisor points it at the
+# instance dir so /etc/asterisk, /logs and /var/lib/asterisk land somewhere writable.
+PREFIX = os.environ.get("MDD_PREFIX", "")
+
+LOGS_DIR = PREFIX + "/logs"
+SOUNDS_DIR = PREFIX + "/var/lib/asterisk/mdd-sounds"
 
 
 def _default_gateway_ipv4():
@@ -74,17 +81,20 @@ def container_ipv4():
             pass
         finally:
             s.close()
-    try:
-        out = subprocess.check_output(["hostname", "-I"], text=True).split()
-        for tok in out:
-            try:
-                ip = ipaddress.ip_address(tok)
-                if ip.version == 4 and not ip.is_loopback:
-                    return str(ip)
-            except ValueError:
-                continue
-    except Exception:
-        pass
+    if sys.platform != "darwin":
+        # `hostname -I` is Linux-only; macOS prints a usage error to stderr. The UDP
+        # fallback below covers it, so skip the call entirely there.
+        try:
+            out = subprocess.check_output(["hostname", "-I"], text=True).split()
+            for tok in out:
+                try:
+                    ip = ipaddress.ip_address(tok)
+                    if ip.version == 4 and not ip.is_loopback:
+                        return str(ip)
+                except ValueError:
+                    continue
+        except Exception:
+            pass
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("1.1.1.1", 80))
@@ -137,10 +147,14 @@ def build_context(cfg):
     epdg = cfg.get("epdg") or f"epdg.epc.mnc{mnc}.mcc{mcc}.pub.3gppnetwork.org"
     nai = f"0{imsi}@nai.epc.mnc{mnc}.mcc{mcc}.3gppnetwork.org"
     # P-CSCF: explicit config wins; else a discovered address exported by entrypoint.
+    # MDD_RUNDIR is /run/mdd-sim-gateway in the container; the native macOS engine
+    # redirects it to the per-line prefix (entrypoint exports the same variable, so
+    # this lookup is identical on Linux).
     pcscf = cfg.get("pcscf", "")
-    if not pcscf and os.path.exists("/run/mdd-sim-gateway/pcscf"):
+    _pcscf_path = os.path.join(os.environ.get("MDD_RUNDIR", "/run/mdd-sim-gateway"), "pcscf")
+    if not pcscf and os.path.exists(_pcscf_path):
         try:
-            pcscf = open("/run/mdd-sim-gateway/pcscf").read().strip()
+            pcscf = open(_pcscf_path).read().strip()
         except Exception:
             pcscf = ""
     sip = cfg.get("sip", {})
@@ -182,6 +196,12 @@ def build_context(cfg):
         # -> bind [::]:5060; IPv4 P-CSCF (Vodafone UK, cp_mode=v4) -> bind 0.0.0.0:5060.
         "pcscf_is_v6": (":" in pcscf),
         "local_addr": cfg.get("local_addr") or container_ipv4(),
+        # HTTP (browser-softphone WebSocket) bind address. On the native macOS engine the
+        # control plane runs on the same host and relays to ws://127.0.0.1:8088/ws, so bind
+        # loopback only. In the container (no MDD_PREFIX) the relay dials the container's
+        # bridge address — behavior unchanged.
+        "http_bind_addr": ("127.0.0.1" if PREFIX else
+                           (cfg.get("local_addr") or container_ipv4())),
         "ike_proposals": ike.get("proposals", default_ike),
         "esp_proposals": ike.get("esp_proposals", default_esp),
         # P-Access-Network-Info: i-wlan-node-id should be the Wi-Fi AP BSSID (MAC). The
@@ -227,6 +247,30 @@ def build_context(cfg):
         "rtp_bind_addr": cfg.get("local_addr") or container_ipv4(),
         "rtp_start": cfg.get("rtp_start", 10000),
         "rtp_end": cfg.get("rtp_end", 11000),
+        # macOS port: filesystem locations baked into the rendered configs. The Linux
+        # defaults below are byte-identical to the previous hardcoded template values.
+        "logs_dir": LOGS_DIR,
+        "astlogdir": LOGS_DIR + "/asterisk",
+        "sounds_dir": SOUNDS_DIR,
+        "notify_bin": os.environ.get("MDD_NOTIFY_BIN", "/usr/local/bin/notify.py"),
+        # pjsip's bind_interface is a Linux SO_BINDTODEVICE knob; macOS has no such
+        # socket option and relies on the P-CSCF /32 scoped route instead, so the line
+        # is omitted entirely on darwin (utun devices cannot be named ipsec0 anyway).
+        "bind_interface": ("" if sys.platform == "darwin"
+                           else os.environ.get("SWU_IFACE", "ipsec0")),
+        # Native (macOS) mode: Asterisk runs from a DESTDIR-staged build whose compiled-in
+        # defaults point at /usr/local, and multiple lines share one binary — every mutable
+        # or per-line directory must be redirected into MDD_PREFIX. On Linux (no prefix)
+        # these keys are omitted entirely, keeping the container's compiled defaults.
+        "native_dirs": bool(PREFIX),
+        "astmoddir": os.environ.get("MDD_ASTMODDIR", ""),
+        "astetcdir": PREFIX + "/etc/asterisk",
+        "astvarlibdir": PREFIX + "/var/lib/asterisk",
+        "astdbdir": PREFIX + "/lib/asterisk",
+        "astkeydir": PREFIX + "/lib/asterisk/keys",
+        "astspooldir": PREFIX + "/spool/asterisk",
+        "astrundir": PREFIX + "/run/asterisk",
+        "astdatadir": PREFIX + "/var/lib/asterisk",
         "debug_asterisk": cfg.get("debug", {}).get("asterisk", False),
         "debug_charon": cfg.get("debug", {}).get("charon", False),
     }
@@ -242,26 +286,26 @@ def main():
                       keep_trailing_newline=True)
 
     outputs = {
-        "asterisk.conf.j2": "/etc/asterisk/asterisk.conf",
-        "modules.conf.j2": "/etc/asterisk/modules.conf",
-        "logger.conf.j2": "/etc/asterisk/logger.conf",
-        "manager.conf.j2": "/etc/asterisk/manager.conf",
-        "acl.conf.j2": "/etc/asterisk/acl.conf",
-        "cdr.conf.j2": "/etc/asterisk/cdr.conf",
-        "cel.conf.j2": "/etc/asterisk/cel.conf",
-        "features.conf.j2": "/etc/asterisk/features.conf",
-        "ccss.conf.j2": "/etc/asterisk/ccss.conf",
-        "indications.conf.j2": "/etc/asterisk/indications.conf",
-        "pjproject.conf.j2": "/etc/asterisk/pjproject.conf",
-        "stasis.conf.j2": "/etc/asterisk/stasis.conf",
-        "udptl.conf.j2": "/etc/asterisk/udptl.conf",
-        "rtp.conf.j2": "/etc/asterisk/rtp.conf",
-        "http.conf.j2": "/etc/asterisk/http.conf",
-        "pjsip.conf.j2": "/etc/asterisk/pjsip.conf",
-        "extensions.conf.j2": "/etc/asterisk/extensions.conf",
-        "ami_usim.ini.j2": "/usr/local/etc/ami_usim.ini",
+        "asterisk.conf.j2": PREFIX + "/etc/asterisk/asterisk.conf",
+        "modules.conf.j2": PREFIX + "/etc/asterisk/modules.conf",
+        "logger.conf.j2": PREFIX + "/etc/asterisk/logger.conf",
+        "manager.conf.j2": PREFIX + "/etc/asterisk/manager.conf",
+        "acl.conf.j2": PREFIX + "/etc/asterisk/acl.conf",
+        "cdr.conf.j2": PREFIX + "/etc/asterisk/cdr.conf",
+        "cel.conf.j2": PREFIX + "/etc/asterisk/cel.conf",
+        "features.conf.j2": PREFIX + "/etc/asterisk/features.conf",
+        "ccss.conf.j2": PREFIX + "/etc/asterisk/ccss.conf",
+        "indications.conf.j2": PREFIX + "/etc/asterisk/indications.conf",
+        "pjproject.conf.j2": PREFIX + "/etc/asterisk/pjproject.conf",
+        "stasis.conf.j2": PREFIX + "/etc/asterisk/stasis.conf",
+        "udptl.conf.j2": PREFIX + "/etc/asterisk/udptl.conf",
+        "rtp.conf.j2": PREFIX + "/etc/asterisk/rtp.conf",
+        "http.conf.j2": PREFIX + "/etc/asterisk/http.conf",
+        "pjsip.conf.j2": PREFIX + "/etc/asterisk/pjsip.conf",
+        "extensions.conf.j2": PREFIX + "/etc/asterisk/extensions.conf",
+        "ami_usim.ini.j2": PREFIX + "/usr/local/etc/ami_usim.ini",
     }
-    os.makedirs("/etc/asterisk", exist_ok=True)
+    os.makedirs(PREFIX + "/etc/asterisk", exist_ok=True)
     for tpl, dest in outputs.items():
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         rendered = env.get_template(tpl).render(**ctx)
@@ -275,16 +319,15 @@ def main():
     if ctx.get("vm_enabled"):
         # Record() will not create its own directory, and a failure there loses the message
         # with nothing but a dialplan warning to show for it.
-        os.makedirs("/logs/voicemail", exist_ok=True)
+        os.makedirs(LOGS_DIR + "/voicemail", exist_ok=True)
     sounds_src = os.path.join(TPL_DIR, "sounds")
     if os.path.isdir(sounds_src):
-        sounds_dst = "/var/lib/asterisk/mdd-sounds"
-        os.makedirs(sounds_dst, exist_ok=True)
+        os.makedirs(SOUNDS_DIR, exist_ok=True)
         for name in os.listdir(sounds_src):
             src = os.path.join(sounds_src, name)
             if os.path.isfile(src):
-                shutil.copyfile(src, os.path.join(sounds_dst, name))
-                print(f"[render] sound {name} -> {sounds_dst}")
+                shutil.copyfile(src, os.path.join(SOUNDS_DIR, name))
+                print(f"[render] sound {name} -> {SOUNDS_DIR}")
 
     # Export env for keeper / ami_usim / swu_ike
     env_path = os.environ.get("MDD_ENV", "/run/mdd-sim-gateway/engine.env")

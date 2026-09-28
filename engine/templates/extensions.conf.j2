@@ -20,8 +20,8 @@
 exten => {{ any_extension }},1,NoOp(Incoming call from ${CALLERID(num)})
 same => n,Set(CALLPEER=${CALLERID(num)})
 same => n,Progress()
-same => n,Set(FILE(/logs/calls.txt,,,a)=IN call from ${CALLERID(num)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)})
-same => n,TrySystem(/usr/local/bin/notify.py call_in "${CALLERID(num)}" &)
+same => n,Set(FILE({{ logs_dir }}/calls.txt,,,a)=IN call from ${CALLERID(num)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)})
+same => n,TrySystem({{ notify_bin }} call_in "${CALLERID(num)}" &)
 same => n,WaitForPrecondition(10,2000)
 same => n,Ringing()
 {% if dialstr %}
@@ -75,7 +75,7 @@ exten => t,1,Hangup()
 ; the call log. Hangup() terminates the ordinary 'h' routine so no fall-through happens; Return()
 ; is invalid here because this special extension was not entered through Gosub().
 exten => h,1,Gosub(hangup-by,s,1)
-same => n,TrySystem(/usr/local/bin/notify.py call_result in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}" "${GOSUB_RETVAL}" &)
+same => n,TrySystem({{ notify_bin }} call_result in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}" "${GOSUB_RETVAL}" &)
 same => n,Hangup()
 
 {% if vm_enabled %}
@@ -94,14 +94,14 @@ same => n,Wait(0.5)
 ; The prompt ships with this repository (templates/sounds); the base image's own sound
 ; packages are a side effect of its build and are deliberately not relied on. A missing file
 ; must not abort the recording, so the playback is tolerated rather than checked.
-same => n,TryExec(Playback(/var/lib/asterisk/mdd-sounds/vm-beep))
+same => n,TryExec(Playback({{ sounds_dir }}/vm-beep))
 same => n,Set(VMSTART=${EPOCH})
 ; 5s of silence ends it, {{ vm_max_seconds }}s caps it. k keeps what was recorded when the
 ; caller hangs up mid-message (the common case); q suppresses Asterisk's own beep, which the
 ; prompt above already provided.
-same => n,Record(/logs/voicemail/vm-${EPOCH}-${FILTER(0-9+,${CALLPEER})}.wav,5,{{ vm_max_seconds }},kq)
+same => n,Record({{ logs_dir }}/voicemail/vm-${EPOCH}-${FILTER(0-9+,${CALLPEER})}.wav,5,{{ vm_max_seconds }},kq)
 same => n,Set(VMSECS=$[${EPOCH} - ${VMSTART}])
-same => n,TrySystem(/usr/local/bin/notify.py voicemail_new "${CALLPEER}" "${RECORDED_FILE}" "${VMSECS}" &)
+same => n,TrySystem({{ notify_bin }} voicemail_new "${CALLPEER}" "${RECORDED_FILE}" "${VMSECS}" &)
 same => n,Hangup()
 {% endif %}
 
@@ -109,7 +109,7 @@ same => n,Hangup()
 [volte_ims_msg]
 exten => {{ any_extension }},1,NoOp(Incoming SMS from ${MESSAGE(from)})
 same => n,Set(NL=${BASE64_DECODE(Cg==)})
-same => n,Set(FILE(/logs/messages.txt,,,a)=IN SMS from ${MESSAGE(from)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL})
+same => n,Set(FILE({{ logs_dir }}/messages.txt,,,a)=IN SMS from ${MESSAGE(from)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL})
 ; Arguments 3-5 carry the concatenated-SMS segment triplet (ref/total/seq) that
 ; res_pjsip_messaging exposes for a multi-part text (see patches/asterisk/mt_concat_udh.py).
 ; They are EMPTY for an ordinary single-part SMS; the manager reassembles the parts.
@@ -119,7 +119,7 @@ same => n,Set(FILE(/logs/messages.txt,,,a)=IN SMS from ${MESSAGE(from)} at ${STR
 ; Every one of them is a plain integer or lowercase hex, so nothing here can be shell-injected
 ; from the network; an empty value keeps its argument position so the manager stays compatible
 ; with an engine image built before the fields existed.
-same => n,TrySystem(/usr/local/bin/notify.py sms_in "${MESSAGE(from)}" "${BASE64_ENCODE(${MESSAGE(body)})}" "${MESSAGE_DATA(SMS_CONCAT_REF)}" "${MESSAGE_DATA(SMS_CONCAT_TOTAL)}" "${MESSAGE_DATA(SMS_CONCAT_SEQ)}" "${MESSAGE_DATA(SMS_TP_PID)}" "${MESSAGE_DATA(SMS_TP_DCS)}" "${MESSAGE_DATA(SMS_UDH_HEX)}" "${MESSAGE_DATA(SMS_TPDU_HEX)}" &)
+same => n,TrySystem({{ notify_bin }} sms_in "${MESSAGE(from)}" "${BASE64_ENCODE(${MESSAGE(body)})}" "${MESSAGE_DATA(SMS_CONCAT_REF)}" "${MESSAGE_DATA(SMS_CONCAT_TOTAL)}" "${MESSAGE_DATA(SMS_CONCAT_SEQ)}" "${MESSAGE_DATA(SMS_TP_PID)}" "${MESSAGE_DATA(SMS_TP_DCS)}" "${MESSAGE_DATA(SMS_UDH_HEX)}" "${MESSAGE_DATA(SMS_TPDU_HEX)}" &)
 {% for t in msg_targets %}
 same => n,MessageSend(pjsip:{{ t }},${MESSAGE(from)},sip:{{ t }})
 {% endfor %}
@@ -135,11 +135,11 @@ same => n,Hangup()
 ; and still cannot match.
 exten => _[+0-9*#].,1,NoOp(Outgoing call to ${EXTEN} from ${CALLERID(num)})
 same => n,Set(CALLPEER=${EXTEN})
-same => n,Set(FILE(/logs/calls.txt,,,a)=OUT call to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)})
+same => n,Set(FILE({{ logs_dir }}/calls.txt,,,a)=OUT call to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)})
 ; Quote ${EXTEN}: TrySystem runs this through a shell, where '#' starting a word begins a
 ; comment. An unquoted #225# swallowed the argument and every following one, so the call
 ; record was never created — while *#21# survived only because its '#' is mid-word.
-same => n,TrySystem(/usr/local/bin/notify.py call_out "${EXTEN}" &)
+same => n,TrySystem({{ notify_bin }} call_out "${EXTEN}" &)
 ; Ring timeout {{ ring_timeout }}s (configurable): if the callee never answers, Asterisk
 ; CANCELs the outbound INVITE at this deadline instead of leaving it open. The carrier keeps
 ; the early dialog alive and RE-ALERTS the callee (repeated 180 Ringing) for as long as our
@@ -180,7 +180,7 @@ same => n,Hangup()
 exten => h,1,Set(ST=${IF($["${REALSTATUS}" != ""]?${REALSTATUS}:${DIALSTATUS})})
 same => n,Set(CS=${IF($["${REALCAUSE}" != ""]?${REALCAUSE}:${HANGUPCAUSE})})
 same => n,Gosub(hangup-by,s,1)
-same => n,TrySystem(/usr/local/bin/notify.py call_result out "${CALLPEER}" "${ST}" "${CS}" "${GOSUB_RETVAL}" &)
+same => n,TrySystem({{ notify_bin }} call_result out "${CALLPEER}" "${ST}" "${CS}" "${GOSUB_RETVAL}" &)
 same => n,Hangup()
 
 [hangup-by]
@@ -212,7 +212,7 @@ same => n,Return()
 ; Runs when the carrier leg is torn down, by which point the BYE that carried the payload has
 ; already been processed. Ordinary calls reach here with USSD_RESPONSE empty and do nothing.
 exten => s,1,GotoIf($["${USSD_RESPONSE}" = ""]?done)
-same => n,TrySystem(/usr/local/bin/notify.py ussd "${USSDPEER}" "${BASE64_ENCODE(${USSD_RESPONSE})}" &)
+same => n,TrySystem({{ notify_bin }} ussd "${USSDPEER}" "${BASE64_ENCODE(${USSD_RESPONSE})}" &)
 same => n(done),Return()
 
 ; ===== Outgoing SMS from a local endpoint =====
@@ -220,6 +220,6 @@ same => n(done),Return()
 exten => {{ any_extension }},1,NoOp(Outgoing SMS to ${MESSAGE(to)})
 same => n,Set(NL=${BASE64_DECODE(Cg==)})
 same => n,Set(EXTEN=${CUT(CUT(MESSAGE(to),@,1),:,2)})
-same => n,Set(FILE(/logs/messages.txt,,,a)=OUT SMS to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL})
-same => n,TrySystem(/usr/local/bin/notify.py sms_out "${EXTEN}" "${BASE64_ENCODE(${MESSAGE(body)})}" &)
+same => n,Set(FILE({{ logs_dir }}/messages.txt,,,a)=OUT SMS to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL})
+same => n,TrySystem({{ notify_bin }} sms_out "${EXTEN}" "${BASE64_ENCODE(${MESSAGE(body)})}" &)
 same => n,MessageSend(pjsip:volte_ims/${EXTEN}@volte_ims,sip:{{ msisdn }}@{{ realm }},sip:${EXTEN}@volte_ims)

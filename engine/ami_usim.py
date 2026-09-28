@@ -22,6 +22,7 @@ from panoramisk import Manager
 from smartcard.System import readers
 from smartcard.util import toHexString, toBytes
 from smartcard.scard import SCardBeginTransaction, SCardEndTransaction, SCARD_LEAVE_CARD
+import pcsc_platform
 
 RUNDIR = os.environ.get("MDD_RUNDIR", "/run/mdd-sim-gateway")
 USIM_PIN = os.environ.get("USIM_PIN", "")
@@ -259,7 +260,7 @@ def make_connection_index(reader_index):
     if reader_index >= len(r):
         return None
     connection = r[reader_index].createConnection()
-    connection.connect()
+    pcsc_platform.connect(connection)
     connection.transmit(toBytes("00a40004023f0000"))
     got = _usim_aid_from_dir(connection)
     if got is None:
@@ -380,7 +381,14 @@ def probe_foreign_card_once(reader_spec):
     if _foreign_decided:
         return _foreign_verdict
     _foreign_decided = True
-    connection = open_usim(reader_spec)
+    try:
+        connection = open_usim(reader_spec)
+    except Exception:
+        # No card in the reader (or PC/SC wedge): the AKA path reports NO_CARD.
+        # Upstream never hits this because pin_keeper holds the card connected
+        # before ami_usim starts; the native macOS engine can start with the
+        # slot empty (or the card wedged at 0x8010000C after a hard kill).
+        return _foreign_verdict
     if connection is None:
         return _foreign_verdict                # no card yet: the AKA path reports NO_CARD
     try:
@@ -466,7 +474,7 @@ def open_usim(reader_spec):
         if pidx is not None and pidx < len(rlist):
             try:
                 conn = rlist[pidx].createConnection()
-                conn.connect()
+                pcsc_platform.connect(conn)
                 return conn
             except Exception:
                 pass
@@ -478,7 +486,7 @@ def open_usim(reader_spec):
             if str(reader) == wanted:
                 try:
                     conn = reader.createConnection()
-                    conn.connect()
+                    pcsc_platform.connect(conn)
                     return conn
                 except Exception:
                     return None
@@ -488,12 +496,12 @@ def open_usim(reader_spec):
             # One reader holds the only card there is; IMSI cannot be read before the PIN is
             # verified anyway, so scanning for it would just burn PIN tries on that same card.
             conn = rlist[0].createConnection()
-            conn.connect()
+            pcsc_platform.connect(conn)
             return conn
         for r in rlist:
             try:
                 conn = r.createConnection()
-                conn.connect()
+                pcsc_platform.connect(conn)
             except Exception:
                 continue
             with _Tx(conn):
@@ -521,7 +529,7 @@ def open_usim(reader_spec):
     if idx < 0 or idx >= len(rlist):
         return None
     conn = rlist[idx].createConnection()
-    conn.connect()
+    pcsc_platform.connect(conn)
     return conn
 
 

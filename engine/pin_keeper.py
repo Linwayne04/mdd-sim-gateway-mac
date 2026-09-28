@@ -32,6 +32,7 @@ from smartcard.System import readers
 from smartcard.util import toBytes, toHexString
 from smartcard.Exceptions import NoCardException, CardConnectionException
 from smartcard.scard import SCardBeginTransaction, SCardEndTransaction, SCARD_LEAVE_CARD
+import pcsc_platform
 
 
 def _hcard(conn):
@@ -452,7 +453,7 @@ def find_reader(reader_spec):
     def _open(r):
         try:
             c = r.createConnection()
-            c.connect()
+            pcsc_platform.connect(c)
             return c
         except Exception:
             return None

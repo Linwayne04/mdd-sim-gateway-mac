@@ -1,7 +1,19 @@
 [directories]
 ; Asterisk's own logs go to the bind-mounted /logs so they outlive both a container restart
 ; and a manager rebuild. Everything else stays at the build-time default.
-astlogdir = /logs/asterisk
+; (macOS port: {{ astlogdir }} is MDD_PREFIX-redirected; identical to /logs/asterisk on Linux.)
+astlogdir = {{ astlogdir }}
+{% if native_dirs %}
+; mdd-sim-gateway macOS port: per-line redirects (staged binary, shared /usr/local defaults).
+astetcdir = {{ astetcdir }}
+astmoddir = {{ astmoddir }}
+astvarlibdir = {{ astvarlibdir }}
+astdbdir = {{ astdbdir }}
+astkeydir = {{ astkeydir }}
+astspooldir = {{ astspooldir }}
+astrundir = {{ astrundir }}
+astdatadir = {{ astdatadir }}
+{% endif %}
 
 [options]
 verbose = {{ 5 if debug_asterisk else 2 }}

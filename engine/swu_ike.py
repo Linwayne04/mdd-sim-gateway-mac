@@ -20,13 +20,20 @@ import hashlib
 import ipaddress
 
 from outer_transport import proxy_udp_socket
+import pcsc_platform
 
 # Python 3.14 changed POSIX multiprocessing's default from fork to forkserver.  The SWu data
 # plane workers intentionally inherit the live IKE/crypto state; serialising that state is both
 # unnecessary and impossible (cryptography's DHParameterNumbers is not picklable).  Keep the
 # Linux behaviour this engine was designed and tested with, explicitly, across Python upgrades.
-if sys.platform.startswith("linux"):
+# macOS note: darwin defaults to spawn, which would NOT inherit the tun/esp socket fds the
+# workers select() on, so fork is required there exactly as on Linux.
+if sys.platform.startswith(("linux", "darwin")):
     multiprocessing.set_start_method("fork", force=True)
+
+if sys.platform == "darwin":
+    # mdd-sim-gateway macOS port: utun(4) device + scoped-route helpers.
+    import utun_darwin
 
 from optparse import OptionParser
 from binascii import hexlify, unhexlify
@@ -47,7 +54,14 @@ except Exception:                     # pragma: no cover
     SCardBeginTransaction = SCardEndTransaction = None
     SCARD_LEAVE_CARD = 0
 
-from card.USIM import *
+try:
+    from card.USIM import *
+except ImportError:
+    # mdd-sim-gateway macOS port: mitshell (github.com/mitshell/card) may not be
+    # installed yet — the active EAP-AKA path (_read_res_ck_ik_pin) does its own
+    # APDUs and never touches it; only read_imsi_2 does. Degrade to a clear error
+    # there instead of failing the whole import.
+    USIM = None
 
 requests.packages.urllib3.disable_warnings()
 
@@ -234,7 +248,9 @@ def swu_write_pcscf(addr):
 
 def swu_notify(event, arg=None):
     try:
-        cmd = ["python3", SWU_NOTIFY, event]
+        # sys.executable (see swu_apply_pcscf): the native engine's venv python, not
+        # whatever PATH-resolved python3 the LaunchDaemon environment happens to have.
+        cmd = [sys.executable, SWU_NOTIFY, event]
         if arg:
             cmd.append(arg)
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -245,8 +261,15 @@ def swu_notify(event, arg=None):
 def _asterisk_cli(command):
     """Run one Asterisk CLI command, best effort."""
     try:
-        subprocess.call(["asterisk", "-rx", command],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = [_asterisk_bin()]
+        # mdd-sim-gateway macOS port: per-line config dir; -C keeps the CLI on THIS
+        # line's Asterisk instead of whatever the compiled default config points at.
+        conf = os.environ.get("MDD_ASTERISK_CONF", "")
+        if conf:
+            cmd += ["-C", conf]
+        cmd += ["-rx", command]
+        subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        env=_asterisk_env())
     except Exception:
         pass
 
@@ -274,11 +297,31 @@ def _pcscf_debug_window(seconds):
         _asterisk_cli("core set debug 0")
 
 
+def _asterisk_bin():
+    """Asterisk executable: the native macOS engine's staged binary (MDD_AST_BIN, exported by
+    the per-line supervisor) or the container's PATH-resolved `asterisk`."""
+    return os.environ.get("MDD_AST_BIN", "asterisk")
+
+
+def _asterisk_env():
+    """Environment for spawning the staged Asterisk CLI: macOS dyld needs the staged
+    lib dir, which the supervisor only guarantees from the next restart."""
+    lib = os.environ.get("MDD_AST_LIB", "")
+    if lib and not os.environ.get("DYLD_LIBRARY_PATH"):
+        env = dict(os.environ)
+        env["DYLD_LIBRARY_PATH"] = lib
+        return env
+    return None
+
+
 def _asterisk_running():
     """True when an Asterisk accepts remote-console commands in this container."""
     try:
-        return subprocess.call(["asterisk", "-rx", "core show uptime"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+        conf = os.environ.get("MDD_ASTERISK_CONF", "")
+        cmd = [_asterisk_bin()] + (["-C", conf] if conf else []) + ["-rx", "core show uptime"]
+        return subprocess.call(cmd,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               env=_asterisk_env()) == 0
     except Exception:
         return False
 
@@ -334,7 +377,10 @@ def swu_apply_pcscf(addr, tunnel_rebuilt=False):
         # Under `restart` the old behaviour could otherwise cold-restart an Asterisk that had
         # only just come up.
         if not _asterisk_running():
-            subprocess.call(["python3", render],
+            # sys.executable, not "python3": the native macOS engine's venv python has
+            # jinja2, while the LaunchDaemon PATH's /usr/bin/python3 does not — a bare
+            # python3 here fails the render silently (DEVNULL) and leaves the old config.
+            subprocess.call([sys.executable, render],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with open(os.path.join(SWU_RUNDIR, "pcscf.applied"), "w") as f:
                 f.write(addr)
@@ -348,7 +394,7 @@ def swu_apply_pcscf(addr, tunnel_rebuilt=False):
                     % (last, addr, mode))
         swu_notify("pcscf_apply_start", mode)
         _pcscf_debug_window(int(os.environ.get("SWU_PCSCF_DEBUG_SECONDS", "90") or 0))
-        subprocess.call(["python3", render], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.call([sys.executable, render], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Write the applied-marker BEFORE touching Asterisk. Under `restart` the config is
         # already on disk and a cold start picks it up, so a restart that never returns must not
         # leave the marker stale and re-trigger this on the next discovery.
@@ -958,6 +1004,270 @@ ROLE_INITIATOR = 1
 ROLE_RESPONDER = 0
 
 
+if sys.platform == "darwin":
+    # mdd-sim-gateway macOS port: SIP IPsec legs (3GPP TS 33.203) in userspace.
+    #
+    # On Linux, Asterisk's volte.c programs kernel XFRM SAs so SIP after the 401
+    # rides ESP between the UE sec ports and the P-CSCF sec ports. macOS has no
+    # XFRM and PF_KEY flow control is not exposed, so volte.c (Darwin build)
+    # instead exports the negotiated parameters to $MDD_RUNDIR/sipsec.json and
+    # the dataplane below applies ESP transport mode on the tunnel path:
+    #   outbound: SIP plaintext (read off the utun) -> ESP(spi=P-CSCF) -> the
+    #             resulting IP packet is itself the inner packet of the IKE
+    #             tunnel (ESP-in-ESP through the ePDG).
+    #   inbound:  IKE-decapsulated inner packet with proto ESP and a known SPI
+    #             -> ESP-decrypt -> plaintext injected back into the utun, where
+    #             the kernel delivers it to Asterisk's sec-port socket.
+    # ESP state lives per worker process (the dataplane workers are forked, so a
+    # module-level cache is copy-on-write per child — each polls the file).
+
+    _SIPSEC_FILE = os.path.join(SWU_RUNDIR, "sipsec.json")
+    _sipsec_cache = {"mtime": None, "flow": None}
+    _sipsec_out_seq = {}          # leg ("c"/"s") -> next ESP sequence number
+    _sipsec_in_seq = {}           # local SPI -> highest accepted inbound seq
+
+    def _sipsec_load():
+        """Reload the flow record Asterisk's volte.c exported, stat-cached."""
+        try:
+            st = os.stat(_SIPSEC_FILE)
+            if st.st_mtime == _sipsec_cache["mtime"]:
+                return _sipsec_cache["flow"]
+            with open(_SIPSEC_FILE) as f:
+                d = _json.load(f)
+        except Exception:
+            return None
+        if not d.get("active"):
+            _sipsec_cache["mtime"] = st.st_mtime
+            _sipsec_cache["flow"] = None
+            return None
+        alg = str(d.get("alg") or "")
+        ealg = str(d.get("ealg") or "")
+        if alg == "hmac-md5-96":
+            # HMAC-MD5-96: 128-bit key, 96-bit ICV.
+            ikey, imod = unhexlify(d["ik"]), hashes.MD5()
+        elif alg == "hmac-sha-1-96":
+            # volte.c pads IK with 4 zero bytes to 160 bits for HMAC-SHA-1.
+            ikey, imod = unhexlify(d["ik"]) + b"\x00" * 4, hashes.SHA1()
+        else:
+            swu_log("sipsec: unsupported alg %r; SIP IPsec disabled" % alg)
+            _sipsec_cache["mtime"] = st.st_mtime
+            _sipsec_cache["flow"] = None
+            return None
+        if ealg == "aes-cbc":
+            ckey = unhexlify(d["ck"])
+        elif ealg == "null":
+            ckey = None
+        else:
+            swu_log("sipsec: unsupported ealg %r; SIP IPsec disabled" % ealg)
+            _sipsec_cache["mtime"] = st.st_mtime
+            _sipsec_cache["flow"] = None
+            return None
+        flow = {
+            "local_ip": d["local_ip"], "remote_ip": d["remote_ip"],
+            # Normalized objects: textual forms of the same v6 address vary (:: vs :0:),
+            # and egress/ingress must dispatch on the packet's address family anyway.
+            "local_obj": ipaddress.ip_address(str(d["local_ip"])),
+            "remote_obj": ipaddress.ip_address(str(d["remote_ip"])),
+            "lp_c": int(d["local_port_c"]), "lp_s": int(d["local_port_s"]),
+            "rp_c": int(d["remote_port_c"]), "rp_s": int(d["remote_port_s"]),
+            "ls_c": int(d["local_spi_c"]), "ls_s": int(d["local_spi_s"]),
+            "rs_c": int(d["remote_spi_c"]), "rs_s": int(d["remote_spi_s"]),
+            "ikey": ikey, "imod": imod, "ckey": ckey,
+        }
+        _sipsec_cache["mtime"] = st.st_mtime
+        _sipsec_cache["flow"] = flow
+        swu_log("sipsec: flow loaded: local %s:%d/%d remote %s:%d/%d alg=%s ealg=%s"
+                % (flow["local_ip"], flow["lp_c"], flow["lp_s"],
+                   flow["remote_ip"], flow["rp_c"], flow["rp_s"], alg, ealg))
+        return flow
+
+    def _ipv4_checksum(hdr):
+        if len(hdr) % 2:
+            hdr += b"\x00"
+        s = 0
+        for i in range(0, len(hdr), 2):
+            s += (hdr[i] << 8) | hdr[i + 1]
+        s = (s & 0xffff) + (s >> 16)
+        s = (s & 0xffff) + (s >> 16)
+        return (~s) & 0xffff
+
+    def _sipsec_build_esp(seg, next_hdr, spi, seq, flow):
+        """ESP transport-mode message (RFC 4303): SPI|seq|IV|cipher(pad(seg))|ICV-96."""
+        if flow["ckey"] is not None:
+            block = 16
+        else:
+            block = 4
+        pad_len = (block - ((len(seg) + 2) % block)) % block
+        data = seg + bytes(range(1, pad_len + 1)) + bytes([pad_len, next_hdr])
+        head = struct.pack("!II", spi, seq)
+        if flow["ckey"] is not None:
+            iv = os.urandom(16)
+            enc = Cipher(algorithms.AES(flow["ckey"]), modes.CBC(iv)).encryptor()
+            body = head + iv + enc.update(data) + enc.finalize()
+        else:
+            body = head + data
+        h = hmac.HMAC(flow["ikey"], flow["imod"])
+        h.update(body)
+        return body + h.finalize()[0:12]
+
+    def _sipsec_egress(packet):
+        """Outward SIP leg. Returns the ESP-wrapped inner IP packet, or None when the
+        packet is not SIP-sec traffic (plain tunnel path). v4 and v6 P-CSCFs."""
+        try:
+            ver = packet[0] >> 4
+            if ver == 4:
+                if len(packet) < 28:
+                    return None
+                ihl = (packet[0] & 0x0F) * 4
+                proto = packet[9]
+                if proto not in (6, 17):
+                    return None
+                flow = _sipsec_load()
+                if not flow or flow["remote_obj"].version != 4:
+                    return None
+                total = struct.unpack("!H", packet[2:4])[0]
+                dst_ip = socket.inet_ntoa(packet[16:20])
+                if dst_ip != flow["remote_ip"]:
+                    return None
+                sport, dport = struct.unpack("!HH", packet[ihl:ihl + 4])
+                if sport == flow["lp_c"] and dport == flow["rp_s"]:
+                    spi, leg = flow["rs_s"], "c"
+                elif sport == flow["lp_s"] and dport == flow["rp_c"]:
+                    spi, leg = flow["rs_c"], "s"
+                else:
+                    return None
+                seg = packet[ihl:total]
+                seq = _sipsec_out_seq.get(leg, 1)
+                _sipsec_out_seq[leg] = seq + 1
+                esp = _sipsec_build_esp(seg, proto, spi, seq, flow)
+                hdr = bytearray(20)
+                hdr[0] = 0x45
+                hdr[1] = packet[1]                    # TOS
+                struct.pack_into("!H", hdr, 2, 20 + len(esp))
+                struct.pack_into("!H", hdr, 4, random.randint(0, 0xFFFF))
+                struct.pack_into("!H", hdr, 6, 0)     # DF clear: inner-frag friendly
+                hdr[8] = packet[8]                    # TTL
+                hdr[9] = 50                           # ESP
+                hdr[12:16] = packet[12:16]
+                hdr[16:20] = packet[16:20]
+                struct.pack_into("!H", hdr, 10, _ipv4_checksum(bytes(hdr)))
+                return bytes(hdr) + esp
+            if ver == 6:
+                if len(packet) < 48:
+                    return None
+                if packet[6] not in (6, 17):
+                    return None
+                flow = _sipsec_load()
+                if not flow or flow["remote_obj"].version != 6:
+                    return None
+                dst_obj = ipaddress.IPv6Address(packet[24:40])
+                if dst_obj != flow["remote_obj"]:
+                    return None
+                sport, dport = struct.unpack("!HH", packet[40:44])
+                if sport == flow["lp_c"] and dport == flow["rp_s"]:
+                    spi, leg = flow["rs_s"], "c"
+                elif sport == flow["lp_s"] and dport == flow["rp_c"]:
+                    spi, leg = flow["rs_c"], "s"
+                else:
+                    return None
+                seg = packet[40:]
+                seq = _sipsec_out_seq.get(leg, 1)
+                _sipsec_out_seq[leg] = seq + 1
+                esp = _sipsec_build_esp(seg, packet[6], spi, seq, flow)
+                hdr = bytearray(40)
+                hdr[0] = 0x60
+                hdr[1] = packet[1]                    # traffic class (flow label zeroed)
+                struct.pack_into("!H", hdr, 4, len(esp))
+                hdr[6] = 50                           # ESP
+                hdr[7] = packet[7]                    # hop limit
+                hdr[8:24] = packet[8:24]              # src
+                hdr[24:40] = packet[24:40]            # dst
+                return bytes(hdr) + esp
+            return None
+        except Exception as e:
+            swu_log("sipsec egress error (passing plain): %r" % e)
+            return None
+
+    def _sipsec_ingress(packet):
+        """Inbound SIP leg. Returns (matched, packet): matched=False means not SIP-ESP
+        (pass through); matched=True with None means a dropped SIP-ESP datagram.
+        v4 and v6 P-CSCFs."""
+        try:
+            ver = packet[0] >> 4
+            if ver == 4:
+                if len(packet) < 40:
+                    return (False, None)
+                if packet[9] != 50:
+                    return (False, None)
+                flow = _sipsec_load()
+                if not flow or flow["local_obj"].version != 4:
+                    return (False, None)
+                # Fragmented ESP cannot be decrypted per-fragment; the P-CSCF rarely
+                # fragments (SIP answers are small). Drop and log rather than inject.
+                if (packet[6] & 0x3F) or packet[7]:
+                    swu_log("sipsec: fragmented inbound ESP dropped (need reassembly)")
+                    return (True, None)
+                spi, seq = struct.unpack("!II", packet[20:28])
+                off = 20
+                hdr_len = 20
+            elif ver == 6:
+                if len(packet) < 56:
+                    return (False, None)
+                if packet[6] != 50:
+                    return (False, None)
+                flow = _sipsec_load()
+                if not flow or flow["local_obj"].version != 6:
+                    return (False, None)
+                spi, seq = struct.unpack("!II", packet[40:48])
+                off = 40
+                hdr_len = 40
+            else:
+                return (False, None)
+            if spi == flow["ls_c"]:
+                leg_spi = flow["ls_c"]
+            elif spi == flow["ls_s"]:
+                leg_spi = flow["ls_s"]
+            else:
+                swu_log("sipsec: unknown inbound SPI 0x%08x dropped" % spi)
+                return (True, None)
+            last = _sipsec_in_seq.get(leg_spi, 0)
+            if seq <= last:
+                return (True, None)   # replay / duplicate
+            body = packet[off:]
+            icv = body[-12:]
+            h = hmac.HMAC(flow["ikey"], flow["imod"])
+            h.update(body[:-12])
+            if h.finalize()[0:12] != icv:
+                swu_log("sipsec: ICV mismatch (SPI 0x%08x) dropped" % spi)
+                return (True, None)
+            if flow["ckey"] is not None:
+                iv, ct = body[8:24], body[24:-12]
+                dec = Cipher(algorithms.AES(flow["ckey"]), modes.CBC(iv)).decryptor()
+                data = dec.update(ct) + dec.finalize()
+            else:
+                data = body[8:-12]
+            pad_len, next_hdr = data[-2], data[-1]
+            seg = data[:-2 - pad_len]
+            # Reuse the wire header, restoring length/proto for the plaintext (v6 has no
+            # checksum to fix).
+            hdr = bytearray(packet[:hdr_len])
+            if ver == 4:
+                struct.pack_into("!H", hdr, 2, hdr_len + len(seg))
+                hdr[9] = next_hdr
+                struct.pack_into("!H", hdr, 10, 0)
+                struct.pack_into("!H", hdr, 10, _ipv4_checksum(bytes(hdr)))
+            else:
+                struct.pack_into("!H", hdr, 4, len(seg))
+                hdr[6] = next_hdr
+            _sipsec_in_seq[leg_spi] = seq
+            return (True, bytes(hdr) + seg)
+        except Exception as e:
+            swu_log("sipsec ingress error (dropping): %r" % e)
+            return (True, None)
+            return (True, None)
+
+
+
 class swu():
 
     def __init__(self, source_address,epdg_address,apn,modem,default_gateway,mcc,mnc,imsi,netns):
@@ -1399,8 +1709,19 @@ class swu():
             self.socket_esp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.socket_esp.bind(("127.0.0.1", 0))
         else:
-            self.socket_esp = socket.socket(socket.AF_INET, socket.SOCK_RAW, ESP_PROTOCOL)
-            self.socket_esp.bind(client_address)
+            try:
+                self.socket_esp = socket.socket(socket.AF_INET, socket.SOCK_RAW, ESP_PROTOCOL)
+                self.socket_esp.bind(client_address)
+            except Exception as e:
+                if sys.platform != "darwin":
+                    raise
+                # mdd-sim-gateway macOS port: raw proto-50 unavailable (permissions or
+                # policy). Fall back to the SOCKS-style dummy socket and force RFC 3948
+                # ESP-in-UDP at the NAT-detection decision point below.
+                swu_log("raw ESP socket unavailable (%r); forcing NAT-T userplane" % e)
+                self.socket_esp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.socket_esp.bind(("127.0.0.1", 0))
+                self._esp_raw_ok = False
         self._enable_outer_pmtud(self.socket_esp)
 
     def _enable_outer_pmtud(self, sock):
@@ -2545,6 +2866,10 @@ class swu():
         """The container's outbound LAN interface (the one carrying SWU_SOURCE). Almost always eth0
         in the docker bridge; derived from the source address's owning link so we never hard-code.
         Parsed in pure Python + `ip` (no awk — the engine image ships iproute but not awk)."""
+        if sys.platform == "darwin":
+            # mdd-sim-gateway macOS port: no iproute; the default-route interface is the
+            # egress link (log/diagnostic use only on this path).
+            return utun_darwin.default_route_interface("default") or "en0"
         try:
             out = subprocess.check_output("ip -o -4 addr show", shell=True).decode()
             token = self.source_address + "/"
@@ -2576,6 +2901,9 @@ class swu():
     # --- Data-plane MTU sizing + outbound fragmentation --------------------------------------
     def _iface_mtu(self, iface):
         """Current MTU of a link, read straight from sysfs (no iproute parsing). 0 on any error."""
+        if sys.platform == "darwin":
+            # mdd-sim-gateway macOS port: no /sys/class/net; ifconfig reports "mtu <n>".
+            return utun_darwin.interface_mtu(iface)
         try:
             with open("/sys/class/net/%s/mtu" % iface) as f:
                 return int(f.read().strip())
@@ -2622,18 +2950,24 @@ class swu():
             return SWU_OUTER_MTU_ENV
         candidates = []
         try:
-            out = subprocess.check_output("ip route get %s" % self.epdg_address,
-                                          shell=True, stderr=subprocess.DEVNULL).decode()
-            toks = out.split()
-            dev = None
-            for i, t in enumerate(toks):
-                if t == "dev" and i + 1 < len(toks):
-                    dev = toks[i + 1]
-                elif t == "mtu" and i + 1 < len(toks):
-                    try:
-                        candidates.append(int(toks[i + 1]))     # route-cached PMTU (from PMTUD)
-                    except ValueError:
-                        pass
+            if sys.platform == "darwin":
+                # mdd-sim-gateway macOS port: no `ip route get`; route(8) names the
+                # egress interface (route-cached PMTU is not reported, so the NIC MTU
+                # and the IP_MTU sockopt in _outer_path_mtu carry the sensing instead).
+                dev = utun_darwin.default_route_interface(self.epdg_address)
+            else:
+                out = subprocess.check_output("ip route get %s" % self.epdg_address,
+                                              shell=True, stderr=subprocess.DEVNULL).decode()
+                toks = out.split()
+                dev = None
+                for i, t in enumerate(toks):
+                    if t == "dev" and i + 1 < len(toks):
+                        dev = toks[i + 1]
+                    elif t == "mtu" and i + 1 < len(toks):
+                        try:
+                            candidates.append(int(toks[i + 1]))     # route-cached PMTU (from PMTUD)
+                        except ValueError:
+                            pass
             if dev:
                 dm = self._iface_mtu(dev)                       # egress NIC's own MTU
                 if dm:
@@ -2670,7 +3004,10 @@ class swu():
             # read buffer must never truncate a full inner packet (up to the fixed tun MTU)
             self._tun_read_size = max(2048, tun_mtu + 128)
 
-            self.exec_in_netns("ip link set dev %s mtu %d" % (self.tun_device, tun_mtu))
+            if sys.platform == "darwin":
+                utun_darwin.set_mtu(self.tun_device, tun_mtu)
+            else:
+                self.exec_in_netns("ip link set dev %s mtu %d" % (self.tun_device, tun_mtu))
             swu_log("dataplane MTU: ipsec0(fixed)=%d esp_overhead=%d sensed_outer(%s)=%d "
                     "frag_threshold(inner_mtu)=%d inner_frag=%s"
                     % (tun_mtu, overhead, self._lan_egress_iface(), outer_mtu, inner_mtu, SWU_INNER_FRAG))
@@ -2841,6 +3178,9 @@ class swu():
     def set_routes(self):
 
         self.tunnel = self.open_tun(1)
+        if sys.platform == "darwin":
+            self._set_routes_darwin()
+            return
         # The ePDG's INTERNAL_IP6_ADDRESS is the UE identity for the IMS PDN.
         # Do not let Linux also create a SLAAC/privacy address from an RA seen
         # inside the userspace tunnel: RFC 6724 may select that second address
@@ -2951,6 +3291,52 @@ class swu():
         # in state_connected, inheriting self.inner_mtu) never overflows the outer link MTU.
         self._compute_and_apply_tun_mtu()
 
+    def _set_routes_darwin(self):
+        """mdd-sim-gateway macOS port: scoped host routes instead of the /1 full capture.
+
+        The Linux engine runs in its own network namespace where 0.0.0.0/1 +
+        128.0.0.0/1 are safe; on the macOS host those would hijack the whole Mac's
+        traffic. Instead:
+          - the utun gets the inner address point-to-point (ifconfig, not ip addr);
+          - the ePDG gets a /32 via the physical default gateway (IKE/ESP must stay
+            on the physical path — same role as the Linux ePDG host route);
+          - the P-CSCF /32 (and /128) into the utun is added in state_connected once
+            IKE delivers it, and SDP media peers are learned later by the supervisor;
+          - no ip rule LAN bypass: the tunnel never becomes a default route, so
+            LAN-sourced traffic is untouched by construction.
+        MTU is applied later by _compute_and_apply_tun_mtu (ifconfig path)."""
+        try:
+            # Fresh journal for this attach; routes from a previous tunnel died with
+            # its utun (kernel removes interface routes when the device goes away).
+            os.unlink(os.path.join(SWU_RUNDIR, "media_routes"))
+        except Exception:
+            pass
+        if self.ip_address_list != []:
+            inner = self.ip_address_list[0]
+            utun_darwin.configure(self.tun_device, inner, None)
+            # ePDG host route via the physical gateway (mirrors the Linux branch).
+            gateway = self.default_gateway or (self.get_default_gateway_darwin() or "")
+            if gateway:
+                subprocess.call("route add -host %s %s 2>/dev/null"
+                                % (self.server_address[0], gateway), shell=True)
+            else:
+                swu_log("no default route: ePDG host route not needed")
+        if self.ipv6_address_list == [] and getattr(self, "ipv6_subnet_list", []):
+            # Same INTERNAL_IP6_SUBNET derivation as the Linux branch (P0-1).
+            (prefix, prefix_len) = self.ipv6_subnet_list[0]
+            derived, plen = self._derive_ipv6_address_from_subnet(prefix, prefix_len)
+            if derived:
+                self.ipv6_address_list = [derived]
+                swu_log("assigned derived inner IPv6 %s/%d from INTERNAL_IP6_SUBNET %s/%s" %
+                        (derived, plen, prefix, prefix_len))
+        if self.ipv6_address_list != []:
+            # Link-local first (derived IID, mirroring the Linux fe80::/64), then the
+            # assigned global so SIP sources from the exact IKE-registered address.
+            iid = ':'.join(self.ipv6_address_list[0].split(':')[4:8])
+            for addr in ("fe80::" + iid, self.ipv6_address_list[0]):
+                subprocess.call("ifconfig %s inet6 %s prefixlen 64 alias 2>/dev/null"
+                                % (self.tun_device, addr), shell=True)
+
     def add_dir(self):
         if not os.path.isdir('/etc/netns'):
             os.mkdir('/etc/netns')
@@ -2993,6 +3379,33 @@ class swu():
         return max(0, int(time.time() - started))
 
     def delete_routes(self):
+        if sys.platform == "darwin":
+            # mdd-sim-gateway macOS port: only the scoped host routes exist (ePDG via
+            # physical gw, P-CSCF via utun); there is no netns, no ip rule, no resolv
+            # backup. Closing the fd destroys the utun and its remaining routes.
+            try:
+                if getattr(self, "_darwin_routed_pcscf", ""):
+                    utun_darwin.delete_host_route(self._darwin_routed_pcscf)
+                    self._darwin_routed_pcscf = ""
+                if getattr(self, "_darwin_routed_prefix", ""):
+                    subprocess.call("route delete -inet6 %s 2>/dev/null"
+                                    % self._darwin_routed_prefix, shell=True)
+                    self._darwin_routed_prefix = ""
+                try:
+                    with open(os.path.join(SWU_RUNDIR, "media_routes")) as f:
+                        for line in f:
+                            addr = line.strip()
+                            if addr:
+                                utun_darwin.delete_host_route(addr)
+                    os.unlink(os.path.join(SWU_RUNDIR, "media_routes"))
+                except Exception:
+                    pass
+                subprocess.call("route delete -host %s 2>/dev/null" % self.server_address[0],
+                                shell=True)
+                os.close(self.tunnel)
+            except Exception:
+                pass
+            return
         if self.netns_name:
             subprocess.call("ip netns del %s" % self.netns_name, shell=True)
         else:
@@ -3029,16 +3442,75 @@ class swu():
                 fields = line.strip().split()
                 if fields[1] != '00000000' or not int(fields[3], 16) & 2:
                     continue
-    
+
                 return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16))), fields[0]
+
+    def get_default_gateway_darwin(self):
+        """mdd-sim-gateway macOS port: default IPv4 gateway from `route -n get default`
+        (there is no /proc/net/route). Returns the gateway address or ""."""
+        return utun_darwin.default_gateway()
+
+    def _darwin_route_pcscf(self, pcscf):
+        """mdd-sim-gateway macOS port: point the P-CSCF host route at the utun.
+
+        Replaces the /1 capture that routes it inside the container's netns. Called
+        on every CONNECTED (and on a P-CSCF change via swu_apply_pcscf) so a stale
+        route from a previous attach is replaced, not accumulated.
+
+        The INVITE side of a call is routed by the SIP route-set to the carrier's
+        S-CSCF (e.g. T-Mobile PL: P-CSCF 2a00:1980:20b2:1::4, S-CSCF
+        2a00:1980:20b2:2::9), whose address is NOT in DNS and NOT the P-CSCF. On
+        Linux the /1 full capture reaches it implicitly; the scoped scheme must
+        route the carrier's whole IPv6 block explicitly or the INVITE dies with
+        "No route to host" before it is even sent. The block is the P-CSCF's /32
+        (first two hextets): still fully scoped to one carrier's address space, so
+        the Mac's general traffic is untouched."""
+        if not pcscf:
+            return
+        old = getattr(self, "_darwin_routed_pcscf", "")
+        old_prefix = getattr(self, "_darwin_routed_prefix", "")
+        if old and old != pcscf:
+            utun_darwin.delete_host_route(old)
+        prefix = ""
+        try:
+            if ":" in pcscf:
+                prefix = str(ipaddress.IPv6Network(
+                    (ipaddress.IPv6Address(pcscf), 32), strict=False))
+        except Exception as e:
+            swu_log("carrier v6 block route skipped (%r)" % e)
+        if old_prefix and old_prefix != prefix:
+            subprocess.call("route delete -inet6 %s 2>/dev/null" % old_prefix, shell=True)
+            old_prefix = ""
+        if old != pcscf:
+            if utun_darwin.add_host_route(pcscf, self.tun_device):
+                self._darwin_routed_pcscf = pcscf
+                swu_log("P-CSCF route: %s -> %s" % (pcscf, self.tun_device))
+            else:
+                swu_log("P-CSCF route add failed: %s" % pcscf)
+        if prefix and old_prefix != prefix:
+            rc = os.system("route add -inet6 %s -interface %s 2>/dev/null"
+                           % (prefix, self.tun_device))
+            if rc == 0:
+                self._darwin_routed_prefix = prefix
+                swu_log("carrier v6 block route: %s -> %s" % (prefix, self.tun_device))
+            else:
+                swu_log("carrier v6 block route add failed: %s" % prefix)
 
 
     def open_tun(self,n):
+        if sys.platform == "darwin":
+            # mdd-sim-gateway macOS port: utun(4) instead of /dev/net/tun. The kernel
+            # assigns the name (utunN); it cannot be forced to ipsec0, which is why
+            # pjsip's bind_interface is dropped on darwin (see render.py) and the
+            # P-CSCF /32 scoped route provides the isolation instead.
+            f, ifname = utun_darwin.open_utun()
+            self.tun_device = ifname
+            return f
         TUNSETIFF = 0x400454ca
         IFF_TUN   = 0x0001
         IFF_TAP   = 0x0002
         IFF_NO_PI = 0x1000 # No Packet Information - to avoid 4 extra bytes
-    
+
         TUNMODE = IFF_TUN | IFF_NO_PI
         MODE = 0
         DEBUG = 0
@@ -3050,6 +3522,55 @@ class swu():
         subprocess.call("ip link set dev %s up" % self.tun_device, shell=True)
 
         return f
+
+    def tun_read(self, bufsize):
+        """One inner packet from the tunnel fd. macOS utun frames every packet with a
+        4-byte address-family header (big-endian on darwin 24); Linux IFF_NO_PI is bare."""
+        if sys.platform == "darwin":
+            return utun_darwin.strip_header(os.read(self.tunnel, bufsize + 4))
+        return os.read(self.tunnel, bufsize)
+
+    def tun_write(self, packet):
+        """Write one bare inner IP packet to the tunnel fd (utun AF header added on macOS)."""
+        if sys.platform == "darwin":
+            self._darwin_learn_media_route(packet)
+            return os.write(self.tunnel, utun_darwin.prepend_header(packet))
+        return os.write(self.tunnel, packet)
+
+    def _darwin_learn_media_route(self, packet):
+        """mdd-sim-gateway macOS port: learn IMS media peers from inbound tunnel traffic.
+
+        Without the container's /1 capture, an IMS media gateway's address has no route
+        into the utun, so an MO call's first outbound RTP would take the physical default
+        route and be lost. Inbound needs no route (the ePDG pushes it down the tunnel),
+        so the first inbound RTP/RTCP from the gateway reveals its address — add the
+        scoped /32 on sight and the call recovers within one RTCP interval. Learned
+        routes are journaled to $MDD_RUNDIR/media_routes for teardown."""
+        try:
+            if len(packet) < 20 or (packet[0] >> 4) != 4:
+                return
+            src = socket.inet_ntoa(packet[12:16])
+            if src.startswith(("127.", "224.", "169.254.")):
+                return
+            known = getattr(self, "_darwin_media_routes", None)
+            if known is None:
+                known = self._darwin_media_routes = set()
+                if self.ip_address_list:
+                    known.add(self.ip_address_list[0])
+                if getattr(self, "_darwin_routed_pcscf", ""):
+                    known.add(self._darwin_routed_pcscf)
+            if src in known:
+                return
+            known.add(src)
+            if utun_darwin.add_host_route(src, self.tun_device):
+                swu_log("media route learned: %s -> %s" % (src, self.tun_device))
+                try:
+                    with open(os.path.join(SWU_RUNDIR, "media_routes"), "a") as f:
+                        f.write(src + "\n")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
     def esp_padding(self,length):
@@ -3166,7 +3687,7 @@ class swu():
             icmp = self._icmp_too_big(packet, inner_mtu)
             if icmp:
                 try:
-                    os.write(self.tunnel, icmp)
+                    self.tun_write(icmp)
                 except Exception:
                     pass
         return [packet]
@@ -3333,7 +3854,17 @@ class swu():
                 last_keepalive = time.time()
             for sock in read_sockets:
                 if sock == self.tunnel:
-                    tap_packet = os.read(self.tunnel, getattr(self, "_tun_read_size", 1514))
+                    tap_packet = self.tun_read(getattr(self, "_tun_read_size", 1514))
+
+                    if sys.platform == "darwin":
+                        # SIP IPsec legs: wrap sec-port traffic in ESP transport mode;
+                        # the wrapped packet then rides the IKE tunnel as its inner.
+                        try:
+                            wrapped = _sipsec_egress(tap_packet)
+                        except Exception:
+                            wrapped = None
+                        if wrapped is not None:
+                            tap_packet = wrapped
 
                     if encr_alg is not None:
 
@@ -3391,7 +3922,15 @@ class swu():
                                 decrypted_packet = self.decapsulate_esp_packet(packet,encr_alg,encr_key,integ_alg,integ_key)
                                 if decrypted_packet is not None:
 
-                                    os.write(self.tunnel,decrypted_packet)
+                                    if sys.platform == "darwin":
+                                        # SIP IPsec legs: IKE-decapsulated ESP (proto 50 with a
+                                        # known SPI) is SIP ESP — unwrap before injecting.
+                                        matched, plain = _sipsec_ingress(decrypted_packet)
+                                        if matched:
+                                            if plain is None:
+                                                continue
+                                            decrypted_packet = plain
+                                    self.tun_write(decrypted_packet)
                                     self._note_esp_activity(pipe_ike)
 
                 elif sock == self.socket_esp:
@@ -3403,7 +3942,13 @@ class swu():
                                 decrypted_packet = self.decapsulate_esp_packet(packet[20:],encr_alg,encr_key,integ_alg,integ_key)
                                 if decrypted_packet is not None:
 
-                                    os.write(self.tunnel,decrypted_packet)
+                                    if sys.platform == "darwin":
+                                        matched, plain = _sipsec_ingress(decrypted_packet)
+                                        if matched:
+                                            if plain is None:
+                                                continue
+                                            decrypted_packet = plain
+                                    self.tun_write(decrypted_packet)
                                     self._note_esp_activity(pipe_ike)
                         
                
@@ -4032,16 +4577,15 @@ class swu():
                 self.pcscf_address_list = [new_pcscf] + [a for a in getattr(self, "pcscf_address_list", []) if a != new_pcscf]
             swu_log("P-CSCF restoration: new P-CSCF %s" % new_pcscf)
             swu_write_pcscf(new_pcscf)
+            if sys.platform == "darwin":
+                # mdd-sim-gateway macOS port: move the scoped P-CSCF route to the new address.
+                self._darwin_route_pcscf(new_pcscf)
             swu_notify("pcscf", new_pcscf)
             swu_apply_pcscf(new_pcscf)
         else:
             # No new address: restoration is a re-register against the current P-CSCF.
             swu_log("P-CSCF restoration: no new address supplied; re-registering")
-            try:
-                subprocess.call(["asterisk", "-rx", "pjsip send register volte_ims"],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:
-                swu_log("re-register failed: %r" % e)
+            _asterisk_cli("pjsip send register volte_ims")
         return True
 
     @staticmethod
@@ -4360,6 +4904,11 @@ class swu():
             if self.egress_proxy:
                 # The relay necessarily changes the outer source address.  Force RFC 3948
                 # encapsulation even if a non-conforming peer omitted NAT detection payloads.
+                self.userplane_mode = NAT_TRAVERSAL
+            if sys.platform == "darwin" and getattr(self, "_esp_raw_ok", True) is False:
+                # mdd-sim-gateway macOS port: no raw proto-50 socket on this host. When the
+                # NAT detection hashes MATCHED (no NAT) the code above would have kept raw
+                # ESP, which we cannot send/receive — force RFC 3948 ESP-in-UDP instead.
                 self.userplane_mode = NAT_TRAVERSAL
             
             
@@ -5280,6 +5829,10 @@ class swu():
         inner = (self.ipv6_address_list[0] if self.ipv6_address_list
                  else (self.ip_address_list[0] if self.ip_address_list else ""))
         swu_write_pcscf(pcscf)
+        if sys.platform == "darwin" and pcscf:
+            # mdd-sim-gateway macOS port: no /1 capture here — the P-CSCF needs an
+            # explicit scoped route into the utun for SIP (registration + SMS).
+            self._darwin_route_pcscf(pcscf)
         # Stamped so a later teardown can report how long this tunnel actually lasted. The
         # carrier-side lifetimes only became legible once the durations were in the log next to
         # who initiated the teardown.
@@ -5998,18 +6551,39 @@ class swu():
 
 def get_default_gateway_linux():
     """Read the default gateway directly from /proc."""
-    with open("/proc/net/route") as fh:
-        for line in fh:
-            fields = line.strip().split()
-            if fields[1] != '00000000' or not int(fields[3], 16) & 2:
-                continue
-           
-            return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16))), fields[0]
+def get_default_gateway_linux():
+    try:
+        with open("/proc/net/route") as fh:
+            for line in fh:
+                fields = line.strip().split()
+                if fields[1] != '00000000' or not int(fields[3], 16) & 2:
+                    continue
+
+                return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16))), fields[0]
+    except Exception:
+        pass
+    return None
 
 def get_default_source_address():
     # Evaluated eagerly as the -s default, even when -s is given. A container Engine behind a
     # country exit sits on an internal Docker network with no default route, and this used to
     # raise TypeError before the entrypoint's -s could apply, so the line never started.
+    if sys.platform == "darwin":
+        # mdd-sim-gateway macOS port: no /proc/net/route; ask route(8) which interface
+        # carries the default route, then read that interface's IPv4 from ifconfig.
+        try:
+            iface = utun_darwin.default_route_interface("default")
+            if not iface:
+                return None
+            out = subprocess.check_output("ifconfig %s" % iface, shell=True,
+                                          stderr=subprocess.DEVNULL).decode()
+            for line in out.splitlines():
+                parts = line.split()
+                if "inet" in parts:
+                    return parts[parts.index("inet") + 1]
+        except Exception:
+            return None
+        return None
     gateway = get_default_gateway_linux()
     if not gateway:
         return None
@@ -6262,7 +6836,7 @@ def read_iccid_at_index(reader_index):
     """
     r = readers()
     connection = r[int(reader_index)].createConnection()
-    connection.connect()
+    pcsc_platform.connect(connection)
     try:
         connection.transmit(toBytes('00A40000023F00'))
         connection.transmit(toBytes('00A40000022FE2'))
@@ -6303,7 +6877,7 @@ def read_imsi(reader_index):
     imsi = None
     r = readers()
     connection = r[int(reader_index)].createConnection()
-    connection.connect()
+    pcsc_platform.connect(connection)
     data, sw1, sw2 = connection.transmit(toBytes('00A40000023F00'))     
     data, sw1, sw2 = connection.transmit(toBytes('00A40000027F20'))
     data, sw1, sw2 = connection.transmit(toBytes('00A40000026F07'))
@@ -6319,7 +6893,7 @@ def read_res_ck_ik(reader_index, rand, autn):
     ik = None
     r = readers()
     connection = r[int(reader_index)].createConnection()
-    connection.connect()
+    pcsc_platform.connect(connection)
     data, sw1, sw2 = connection.transmit(toBytes('00A40000023F00'))    
     data, sw1, sw2 = connection.transmit(toBytes('00A40000022F00')) 
     data, sw1, sw2 = connection.transmit(toBytes('00A4040010A0000000871002FF44FFFF8901010100'))
@@ -6335,6 +6909,9 @@ def read_res_ck_ik(reader_index, rand, autn):
 
 #reader functions - more generic using card module
 def read_imsi_2(reader_index): #prepared for AUTS
+    if USIM is None:
+        raise RuntimeError("mitshell card library not installed (pip install "
+                           "git+https://github.com/mitshell/card.git) — required for read_imsi_2")
     a = USIM(int(reader_index))
     return a.get_imsi()
     
@@ -6476,7 +7053,7 @@ def _pcsc_hcard(conn):
 def _read_res_ck_ik_pin(reader_index, rand, autn, pin):
     r = readers()
     conn = r[int(reader_index)].createConnection()
-    conn.connect()
+    pcsc_platform.connect(conn)
     # Exclusive PC/SC transaction for the whole SELECT->VERIFY->AUTHENTICATE sequence: pcscd
     # serializes single APDUs but NOT multi-APDU groups, so without this ami_usim's own AKA
     # APDUs could interleave during a reauth and corrupt the sequence.

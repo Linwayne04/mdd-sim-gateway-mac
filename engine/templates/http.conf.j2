@@ -1,10 +1,11 @@
 [general]
 enabled=yes
-{% if webrtc_enable and local_addr %}
-; Browser softphone SIP-over-WebSocket. Plain WS on the docker-bridge address only: the control
-; surface relays it by line path and terminates TLS itself, nothing publishes this port to the
-; host, and the VoWiFi tunnel's inner address is deliberately not bound.
-bindaddr={{ local_addr }}
+{% if webrtc_enable and http_bind_addr %}
+; Browser softphone SIP-over-WebSocket. Plain WS on a host-local address only: the control
+; surface relays it by line path and terminates TLS itself, nothing publishes this port to
+; the outside, and the VoWiFi tunnel's inner address is deliberately not bound.
+; Container: the docker-bridge address; native macOS engine: loopback (the relay is local).
+bindaddr={{ http_bind_addr }}
 bindport={{ webrtc_ws_port }}
 {% else %}
 bindaddr=127.0.0.1

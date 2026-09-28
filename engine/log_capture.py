@@ -15,6 +15,12 @@ DEFAULT_SEGMENT_BYTES = 10 * 1024 * 1024
 DEFAULT_TOTAL_BYTES = 100 * 1024 * 1024
 DEFAULT_RETENTION_DAYS = 7
 
+# macOS native port: the engine tree runs as root while the control plane runs as the
+# logged-in user, which must read charon.log through the shared data dir. The per-line
+# instance directory is already 0700 user-owned, so group/other bits are never reached;
+# relax the file mode there only. Linux container behavior is unchanged.
+_FILE_MODE = 0o644 if sys.platform == "darwin" else 0o600
+
 
 def timestamp_line(line: str, now: datetime | None = None) -> str:
     stamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d %H:%M:%S%z")
@@ -67,9 +73,9 @@ def rotate_current(current: Path, archive_dir: Path, retention_days: int,
         return None
     target = _archive_name(archive_dir)
     shutil.copy2(current, target)
-    os.chmod(target, 0o600)
+    os.chmod(target, _FILE_MODE)
     current.write_text("")
-    os.chmod(current, 0o600)
+    os.chmod(current, _FILE_MODE)
     prune_archives(archive_dir, retention_days, max_total_bytes)
     return target
 
@@ -81,7 +87,7 @@ def capture(source, current: Path, archive_dir: Path,
     current.parent.mkdir(parents=True, exist_ok=True)
     rotate_current(current, archive_dir, retention_days, max_total_bytes)
     target = current.open("a", encoding="utf-8", buffering=1)
-    os.chmod(current, 0o600)
+    os.chmod(current, _FILE_MODE)
     try:
         for line in source:
             target.write(timestamp_line(line))
@@ -89,7 +95,7 @@ def capture(source, current: Path, archive_dir: Path,
                 target.close()
                 rotate_current(current, archive_dir, retention_days, max_total_bytes)
                 target = current.open("a", encoding="utf-8", buffering=1)
-                os.chmod(current, 0o600)
+                os.chmod(current, _FILE_MODE)
     finally:
         target.close()
 
