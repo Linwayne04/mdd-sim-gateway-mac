@@ -13,6 +13,8 @@
   <a href="https://github.com/MddIdd/mdd-sim-gateway/discussions">社区讨论</a>
 </p>
 
+> 🍎 **這是 macOS 原生移植版（fork）**：本倉庫是 [MddIdd/mdd-sim-gateway](https://github.com/MddIdd/mdd-sim-gateway) 的 macOS 原生移植分支（`macos-port`）——以 LaunchDaemon 引擎、utun 隧道與原生編譯的 Asterisk 取代 Docker 容器。移植計畫與進度見 [docs/macos-port/PLAN.md](docs/macos-port/PLAN.md)；上游的 Docker/Linux 用法維持不變。
+
 MDD Sim Gateway 是自托管的多 SIM 通信网关，可以直接安装在 Debian / Ubuntu / Armbian ARM64 主机上，也可以在任何能运行 Docker Compose 的 Linux 主机上以全容器方式运行，包括群晖等 NAS。它将蜂窝模块、USB 读卡器、IMS、EAP-AKA、eSIM、ModemManager 和 sing-box 整合进一个中英文 Web 控制台。
 
 | 真实 SIM 鉴权 | 通话与短信 | 多模块管理 | 独立国家出口 |
