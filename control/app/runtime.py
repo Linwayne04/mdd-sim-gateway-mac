@@ -44,6 +44,11 @@ class RuntimeRegistry:
             return
         self._on_change = on_change
         self._stop.clear()
+        if engine.engine_native.native_mode():
+            # macOS port: there is no Docker daemon whose event stream to watch; the
+            # native backend reports lifecycle through its own socket. The slow
+            # inspect fallback in get() covers state changes on its own.
+            return
         loop = asyncio.get_running_loop()
         self._processor = asyncio.create_task(self._process_events())
         self._thread = threading.Thread(

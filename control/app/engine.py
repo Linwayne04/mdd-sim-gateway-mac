@@ -26,6 +26,7 @@ import docker
 
 from . import config as cfg, egress, sysinfo
 from .egress_contract import ENGINE_LABEL
+from .platform import engine_native
 
 log = logging.getLogger("mdd.engine")
 
@@ -383,6 +384,9 @@ def ensure_image(client, reference: str = "") -> object:
 
 def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "rebuild"):
     """(Re)create and start the engine container for an instance."""
+    if engine_native.native_mode():
+        # macOS port: process-based engine via the root daemon, same file contract.
+        return engine_native.start(inst, settings, reason=reason)
     if ENGINE_NETWORK in {"host", "none"}:
         raise ValueError("MDD_ENGINE_NETWORK must be a Docker bridge network")
     if DIRECT_NETWORK in {"host", "none"} or (DIRECT_NETWORK and DIRECT_NETWORK == ENGINE_NETWORK):
@@ -532,6 +536,8 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
 
 
 def stop(iid: str, expected_container_id: str | None = None):
+    if engine_native.native_mode():
+        return engine_native.stop(iid, expected_container_id)
     try:
         c = _client().containers.get(container_name(iid))
         if not _owned(c):
@@ -557,7 +563,7 @@ def capture_and_stop(iid: str, inst: dict, reason: str,
 
     Blocking (Docker exec + log read); callers on the event loop must use a worker thread.
     """
-    if expected_container_id:
+    if expected_container_id and not engine_native.native_mode():
         try:
             current = _client().containers.get(container_name(iid))
             if not _owned(current):
@@ -590,6 +596,8 @@ def is_running(iid: str) -> bool:
 
 def container_runtime(iid: str) -> dict:
     """Return running state and bridge address from one Docker inspect operation."""
+    if engine_native.native_mode():
+        return engine_native.container_runtime(iid)
     try:
         c = _client().containers.get(container_name(iid))
         running = c.status == "running"
@@ -611,6 +619,11 @@ def container_runtime(iid: str) -> dict:
                 "restart_count": int(c.attrs.get("RestartCount") or 0),
                 "started_at": str((c.attrs.get("State") or {}).get("StartedAt") or "")}
     except docker.errors.NotFound:
+        return {"running": False, "ip": None, "container_id": None,
+                "restart_count": 0, "started_at": ""}
+    except docker.errors.DockerException:
+        # Docker daemon unreachable (stopped, or native macOS port with no daemon
+        # at all): every line is definitionally not container-running.
         return {"running": False, "ip": None, "container_id": None,
                 "restart_count": 0, "started_at": ""}
 
@@ -669,6 +682,11 @@ def tunnel_installed(iid: str) -> bool:
 
 
 def exec_cli(iid: str, command: str) -> str:
+    if engine_native.native_mode():
+        try:
+            return engine_native.exec_cli(iid, command)
+        except Exception as e:  # noqa
+            return f"error: {e}"
     try:
         c = _client().containers.get(container_name(iid))
         rc, out = c.exec_run(["asterisk", "-rx", command])
@@ -687,13 +705,16 @@ def registration_state(iid: str) -> str:
     """
     client = None
     try:
-        # Use a short-lived client with an HTTP read timeout. Asterisk's remote CLI can block
-        # behind an IMS TCP connect; the normal shared helper intentionally has no global Docker
-        # timeout, so using it here would leave one worker thread behind on every status poll.
-        client = docker.from_env(timeout=5)
-        container = client.containers.get(container_name(iid))
-        rc, raw = container.exec_run(["asterisk", "-rx", "pjsip show registrations"])
-        output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+        if engine_native.native_mode():
+            output = engine_native.exec_cli(iid, "pjsip show registrations")
+        else:
+            # Use a short-lived client with an HTTP read timeout. Asterisk's remote CLI can block
+            # behind an IMS TCP connect; the normal shared helper intentionally has no global Docker
+            # timeout, so using it here would leave one worker thread behind on every status poll.
+            client = docker.from_env(timeout=5)
+            container = client.containers.get(container_name(iid))
+            rc, raw = container.exec_run(["asterisk", "-rx", "pjsip show registrations"])
+            output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
     except Exception:
         return "unknown"
     finally:
@@ -731,6 +752,9 @@ def _format_docker_logs(raw: str, local_tz=None) -> str:
 
 
 def logs(iid: str, tail: int = 200, since=None) -> str:
+    if engine_native.native_mode():
+        # macOS port: the supervisor's console log already carries local-time lines.
+        return engine_native.logs(iid, tail=tail)
     try:
         c = _client().containers.get(container_name(iid))
         # Docker records the emission time for every physical stdout/stderr line. Request that

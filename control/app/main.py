@@ -38,6 +38,7 @@ from . import (store, engine, status as status_mod, sim, card, notify_push, lpa,
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
+from .platform import engine_native
 
 STATUS_OK_GRACE_SECONDS = 20
 STATUS_POLL_FAST_SECONDS = 4.0
@@ -677,6 +678,19 @@ def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
         return engine.start(inst, settings, dev_mounts=dev_mounts, reason=reason)
     except egress.EgressError as exc:
         raise HTTPException(503, {"code": "egress_unavailable", "message": str(exc)})
+    except docker.errors.DockerException as exc:
+        # Native macOS port: no Docker daemon until the process-based engine
+        # backend lands (Phase 2). Surface a clean 503 instead of a bare 500.
+        raise HTTPException(503, {
+            "code": "engine_runtime_unavailable",
+            "message": f"engine runtime unavailable: {exc}",
+        })
+    except engine_native.DaemonUnavailable as exc:
+        # Native macOS port: the root engine daemon is not installed/running yet.
+        raise HTTPException(503, {
+            "code": "engine_runtime_unavailable",
+            "message": f"engine runtime unavailable: {exc}",
+        })
 
 
 def _match_instance_by_iccid(iccid):
@@ -3154,12 +3168,19 @@ def _esim_resolve_se(
 
 
 def _esim_guard_engine(name: str):
-    """Refuse LPA while a VoWiFi engine holds the card (lpac needs exclusive PC/SC)."""
+    """Refuse LPA while a VoWiFi engine holds the card (lpac needs exclusive PC/SC).
+
+    The detail is structured so the WebUI can offer "stop the blocking line and
+    retry" instead of leaving the user to guess which line holds the reader (the
+    UI's own lineRunning view can be stale right after a hotplug auto-start)."""
     inst = _find_running_by_reader(name)
     if inst is not None:
         raise HTTPException(
             409,
-            f"Line {inst.get('id')} is running on this reader — stop it before eSIM operations",
+            {"code": "engine_running",
+             "message": f"Line {inst.get('id')} is running on this reader — "
+                        "stop it before eSIM operations",
+             "instance_id": str(inst.get("id") or "")},
         )
 
 
@@ -3474,23 +3495,31 @@ async def _esim_run(
     refresh_expect_iccid: str | None = None,
 ):
     """Serialize an LPA call: engine gate + per-reader lock + lpa_busy + optional refresh."""
-    await asyncio.to_thread(_esim_guard_engine, name)
-    async with hub.reader_lock(name):
-        hub.lpa_busy[name] = True
-        try:
-            result = await coro
-            if refresh:
-                await _esim_refresh_card(
-                    name, idx, expect_iccid=refresh_expect_iccid,
-                    attempts=ESIM_CARD_REFRESH_ATTEMPTS if refresh_expect_iccid else 1)
-            return result
-        except lpa.LpaError as e:
-            raise HTTPException(400, e.user_message()) from e
-        except FileNotFoundError as e:
-            raise HTTPException(503, str(e)) from e
-        finally:
-            if not keep_busy:
-                hub.lpa_busy.pop(name, None)
+    try:
+        await asyncio.to_thread(_esim_guard_engine, name)
+        async with hub.reader_lock(name):
+            hub.lpa_busy[name] = True
+            try:
+                result = await coro
+                if refresh:
+                    await _esim_refresh_card(
+                        name, idx, expect_iccid=refresh_expect_iccid,
+                        attempts=ESIM_CARD_REFRESH_ATTEMPTS if refresh_expect_iccid else 1)
+                return result
+            except lpa.LpaError as e:
+                raise HTTPException(400, e.user_message()) from e
+            except FileNotFoundError as e:
+                raise HTTPException(503, str(e)) from e
+            finally:
+                if not keep_busy:
+                    hub.lpa_busy.pop(name, None)
+    except BaseException:
+        # The coroutine is created at the call site, before this gate runs. When the
+        # engine gate (or the reader lock) rejects the call, nothing awaits it and
+        # CPython logs "coroutine ... was never awaited" — close it on those paths.
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        raise
 
 
 @app.get("/api/cards")
@@ -5935,6 +5964,12 @@ def detect_sms_result(iid: str, since=None) -> dict:
         if not m:
             continue
         if re.search(r"CSeq:\s*\d+\s+MESSAGE", b):   # a response to our MESSAGE
+            # The split leaves the logger's source tail ("... from WS:127.0.0.1:8088 --->")
+            # on the block: skip softphone-relay answers. The browser JsSIP UA answers the
+            # WS notification MESSAGE with 405, which is not a carrier verdict and must not
+            # overwrite the real outcome.
+            if re.search(r"from (WS|WSS):127\.0\.0\.1", b.splitlines()[0]):
+                continue
             code = int(m.group(1))
             result = {"ok": 200 <= code < 300, "code": code, "reason": m.group(2).strip()}
     return result

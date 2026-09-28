@@ -13,6 +13,7 @@ refuse a line. "unsupported" is a strong statement, but the user can always try 
 """
 from __future__ import annotations
 
+import ipaddress
 import socket
 import threading
 import time
@@ -31,6 +32,9 @@ REASONS = {
                       "in selected cities. You can still try it.",
     "epdg_nxdomain": "The carrier publishes no VoWiFi (ePDG) address, so Wi-Fi Calling is "
                      "most likely not offered. You can still try it.",
+    "epdg_placeholder": "The carrier's published VoWiFi (ePDG) address is a placeholder that "
+                        "points at this device itself, so Wi-Fi Calling is most likely not "
+                        "offered from this network. You can still try it.",
 }
 
 # (mcc, mnc) or (mcc, None) for every network of that country code.
@@ -55,10 +59,10 @@ def epdg_fqdn(mcc: str, mnc: str) -> str:
 
 
 def lookup(fqdn: str) -> str:
-    """"ok", "nxdomain" (the name does not exist) or "error" (nothing learned)."""
+    """"ok", "nxdomain" (the name does not exist), "placeholder" (the only answers are
+    loopback — the zone exists but the record is a dummy) or "error" (nothing learned)."""
     try:
-        socket.getaddrinfo(fqdn, None)
-        return "ok"
+        infos = socket.getaddrinfo(fqdn, None)
     except socket.gaierror as exc:
         # EAI_NONAME is an authoritative "no such name"; EAI_AGAIN/EAI_FAIL are outages.
         # EAI_NODATA (name exists, no address) is not defined on every platform.
@@ -67,6 +71,10 @@ def lookup(fqdn: str) -> str:
         return "error"
     except OSError:
         return "error"
+    addresses = {info[4][0] for info in infos}
+    if addresses and all(ipaddress.ip_address(addr).is_loopback for addr in addresses):
+        return "placeholder"
+    return "ok"
 
 
 def probe(fqdn: str) -> str:
@@ -118,6 +126,8 @@ def assess(mcc: str, mnc: str, fqdn: str = "", *, dns: str | None = None) -> dic
     answer = dns if dns is not None else cached(fqdn)
     if answer == "nxdomain":
         return {"status": UNSUPPORTED, "source": "dns", "reason": REASONS["epdg_nxdomain"]}
+    if answer == "placeholder":
+        return {"status": UNSUPPORTED, "source": "dns", "reason": REASONS["epdg_placeholder"]}
     if answer == "ok":
         return {"status": SUPPORTED, "source": "dns", "reason": ""}
     return {"status": UNKNOWN, "source": "", "reason": ""}

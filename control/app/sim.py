@@ -21,6 +21,7 @@ from smartcard.Exceptions import NoCardException, CardConnectionException
 from smartcard.scard import SCardBeginTransaction, SCardEndTransaction, SCARD_LEAVE_CARD
 
 from . import usbreader
+from .platform import pcsc
 
 log = logging.getLogger("vowifi.sim")
 
@@ -416,7 +417,7 @@ def read_card(reader_index: int = 0, pin: str | None = None) -> CardInfo:
         pass
     try:
         conn = r.createConnection()
-        conn.connect()
+        pcsc.connect(conn)
     except (NoCardException, CardConnectionException) as e:
         info.error = f"no card: {e}"
         return info
@@ -503,7 +504,7 @@ def _find_conn(reader_index: int):
     if reader_index >= len(rlist):
         raise RuntimeError("reader index out of range")
     conn = rlist[reader_index].createConnection()
-    conn.connect()
+    pcsc.connect(conn)
     return conn
 
 
