@@ -1,0 +1,36 @@
+diff --git a/res/res_pjproject.c b/res/res_pjproject.c
+index 865f062..38d781d 100644
+--- a/res/res_pjproject.c
++++ b/res/res_pjproject.c
+@@ -513,8 +513,21 @@ int ast_sockaddr_to_pj_sockaddr(const struct ast_sockaddr *addr, pj_sockaddr *pj
+ 
+ int ast_sockaddr_from_pj_sockaddr(struct ast_sockaddr *addr, const pj_sockaddr *pjaddr)
+ {
++	/* mdd-sim-gateway macOS port: zero the whole ast_sockaddr and set the BSD length
++	 * byte before the field-by-field copies below.  On Darwin, sockaddr_in/sockaddr_in6
++	 * start with sin_len/sin6_len and ast_sockaddr_cmp() raw-memcmps the struct, while
++	 * recvfrom() results always carry sin_len=sizeof(...).  The stock copies left sin_len
++	 * uninitialized, so comparisons of a converted pj address against a received address
++	 * failed intermittently depending on stack garbage — seen in production as DTLS
++	 * packets dropped with "Source not in ICE active candidate list" after ICE had
++	 * completed and the source exactly matched the remote candidate (killing WebRTC
++	 * media). */
++	memset(addr, 0, sizeof(*addr));
+ 	if (pjaddr->addr.sa_family == pj_AF_INET()) {
+ 		struct sockaddr_in *sin = (struct sockaddr_in *) &addr->ss;
++#if defined(__APPLE__)
++		sin->sin_len = sizeof(*sin);
++#endif
+ 		sin->sin_family = AF_INET;
+ #if defined(HAVE_PJPROJECT_BUNDLED) && !defined(HAVE_PJPROJECT_BUNDLED_OOT)
+ 		sin->sin_addr = pjaddr->ipv4.sin_addr;
+@@ -526,6 +539,9 @@ int ast_sockaddr_from_pj_sockaddr(struct ast_sockaddr *addr, const pj_sockaddr *
+ 		addr->len = sizeof(struct sockaddr_in);
+ 	} else if (pjaddr->addr.sa_family == pj_AF_INET6()) {
+ 		struct sockaddr_in6 *sin = (struct sockaddr_in6 *) &addr->ss;
++#if defined(__APPLE__)
++		sin->sin6_len = sizeof(*sin);
++#endif
+ 		sin->sin6_family   = AF_INET6;
+ 		sin->sin6_port     = pjaddr->ipv6.sin6_port;
+ 		sin->sin6_flowinfo = pjaddr->ipv6.sin6_flowinfo;
