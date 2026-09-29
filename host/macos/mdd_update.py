@@ -119,6 +119,13 @@ def run(cmd: list[str], *, timeout: int = 60, cwd: Path | None = None) -> subpro
 def fail(target: str, phase: str, message: str, *, extra: dict | None = None) -> int:
     log(f"FAILED at {phase}: {message}")
     write_status("failed", phase, target=target, error=message, extra=extra)
+    # Consume the request: without this the 300s poll would re-attempt a
+    # persistently-failing update forever (e.g. dirty-tree refusal). The failure
+    # stays visible in update-status.json; the user re-requests from the WebUI.
+    try:
+        REQUEST_PATH.unlink()
+    except OSError:
+        pass
     return 1
 
 
