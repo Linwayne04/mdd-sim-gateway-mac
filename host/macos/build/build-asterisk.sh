@@ -45,9 +45,24 @@ export PKG_CONFIG_PATH="$PM_PREFIX/lib/pkgconfig:$STAGE/lib/pkgconfig"
   export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$PM_PREFIX/share/pkgconfig"
 
 AST="$AST_STAGE/usr/local/sbin/asterisk"
+# .built-rev stamp: records which ASTERISK_REV the staged binary was built
+# from (written by fetch-sources.sh into src/.pinned-revs). A stamp/binary
+# mismatch after a pin change forces a rebuild; a binary with no stamp is a
+# legacy build — stamp it in place and keep skipping (no rebuild).
+PINNED_REV="$(grep ^ASTERISK_REV= "$BUILD_ROOT/src/.pinned-revs" 2>/dev/null | cut -d= -f2)"
+BUILT_REV_STAMP="$AST_STAGE/.built-rev"
 if [ -x "$AST" ]; then
-  echo "== build-asterisk: already staged ($AST) — skipping =="
-  exit 0
+  if [ ! -f "$BUILT_REV_STAMP" ]; then
+    echo "== build-asterisk: already staged ($AST) — no stamp (legacy build); stamping, not rebuilding =="
+    echo "$PINNED_REV" > "$BUILT_REV_STAMP" 2>/dev/null || true
+    exit 0
+  fi
+  if [ -n "$PINNED_REV" ] && [ "$(cat "$BUILT_REV_STAMP" 2>/dev/null)" != "$PINNED_REV" ]; then
+    echo "== build-asterisk: staged binary is at '$(cat "$BUILT_REV_STAMP" 2>/dev/null)', pin is '$PINNED_REV' — REBUILDING =="
+  else
+    echo "== build-asterisk: already staged ($AST) — skipping =="
+    exit 0
+  fi
 fi
 [ -d "$SRC/.git" ] || { echo "missing $SRC — run fetch-sources.sh first" >&2; exit 1; }
 [ -d "$PJPROJECT/.git" ] || { echo "missing $PJPROJECT — run fetch-sources.sh first" >&2; exit 1; }
@@ -226,4 +241,5 @@ make install DESTDIR="$AST_STAGE" > install-macos.log 2>&1
 echo "=== verify ==="
 DYLD_LIBRARY_PATH="$AST_STAGE/usr/local/lib" "$AST" -V
 echo "MODULES_BUILT=$(ls "$AST_STAGE/Library/Application Support/Asterisk/Modules"/*.so | wc -l)"
+echo "$PINNED_REV" > "$BUILT_REV_STAMP"
 echo "build-asterisk: DONE"

@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -71,10 +72,47 @@ def _vcgencmd(*args: str) -> str:
         return ""
 
 
+_darwin_hardware_cache: dict = {}
+
+
+def _darwin_hardware() -> dict:
+    """Model/serial from system_profiler on macOS; {} on any failure."""
+    if _darwin_hardware_cache:
+        return _darwin_hardware_cache
+    if sys.platform != "darwin":
+        return {}
+    try:
+        result = subprocess.run(
+            ["system_profiler", "-timeout", "15", "-detailLevel", "mini",
+             "SPHardwareDataType"],
+            capture_output=True, text=True, timeout=20)
+        if result.returncode != 0:
+            return {}
+        info = {}
+        for line in result.stdout.splitlines():
+            if line.strip().startswith("Model Name:"):
+                info["model"] = line.split(":", 1)[1].strip()
+            elif line.strip().startswith("Serial Number (system):"):
+                info["serial"] = line.split(":", 1)[1].strip()
+        _darwin_hardware_cache.update(info)
+        return _darwin_hardware_cache
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
 def model() -> str:
     """Board model, from the device tree on ARM boards and DMI elsewhere."""
+    if sys.platform == "darwin":
+        return _darwin_hardware().get("model", "")
     value = _read("/proc/device-tree/model").replace("\x00", "").strip()
     return value or _read("/sys/class/dmi/id/product_name")
+
+
+def serial() -> str:
+    """Machine serial number where the platform exposes one."""
+    if sys.platform == "darwin":
+        return _darwin_hardware().get("serial", "")
+    return ""
 
 
 def throttling() -> dict:
@@ -459,7 +497,8 @@ def collect(data_dir: str = "/", *, include_docker_storage: bool = True) -> dict
     }
     for key, value in (("throttling", throttling()),
                        ("undervoltage", undervoltage_events()),
-                       ("usb_devices", usb_devices())):
+                       ("usb_devices", usb_devices()),
+                       ("serial", serial())):
         if value:
             snapshot[key] = value
     return snapshot
