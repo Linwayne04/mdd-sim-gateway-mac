@@ -25,7 +25,7 @@ For macOS 13+ on **both Intel and Apple Silicon** — every component is compile
 git clone https://github.com/Linwayne04/mdd-sim-gateway-mac.git && cd mdd-sim-gateway-mac && ./install-macos.sh install
 ```
 
-`install-macos.sh` checks/installs dependencies, fetches pinned sources (pjproject / Asterisk / AMR codec libraries, all version- and SHA-256-locked), compiles Asterisk with the macOS patches, builds the Python venv and WebUI, and installs the launchd jobs (only the engine daemon step asks for sudo). It is idempotent — re-run it after `git pull`. Then open `https://127.0.0.1:8443`, create the admin account, plug in the reader and add a line. (`status` / `logs` / `uninstall` subcommands mirror the upstream installer.)
+`install-macos.sh` checks/installs dependencies, fetches pinned sources (pjproject / Asterisk / AMR codec libraries, all version- and SHA-256-locked), compiles Asterisk with the macOS patches, builds the Python venv and WebUI, and installs the launchd jobs (only the engine daemon step asks for sudo). It is idempotent — re-run it after `git pull`. Then open `https://127.0.0.1:8443`, create the admin account, plug in the reader and add a line. (`status` / `logs` / `uninstall` subcommands mirror the upstream installer.) Add `--no-autostart` to install the services disabled at boot.
 
 **Manual install:** each step maps to a script under `host/macos/build/` plus `host/macos/install-launchd.sh` — see the Chinese README's step-by-step section or `install-macos.sh` itself.
 

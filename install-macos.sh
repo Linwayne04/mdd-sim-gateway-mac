@@ -6,7 +6,7 @@
 # handled by the toolchain, and Homebrew/MacPorts prefixes are auto-detected.
 #
 # Usage:
-#   ./install-macos.sh install [--no-launchd]   # full install (default command)
+#   ./install-macos.sh install [--no-launchd] [--no-autostart]   # full install (default)
 #   ./install-macos.sh status
 #   ./install-macos.sh logs
 #   ./install-macos.sh uninstall [--purge]      # --purge also deletes the build root
@@ -14,6 +14,10 @@
 # Run as a normal user — the script only escalates via sudo for the root
 # LaunchDaemon step. Every build step is idempotent (existing outputs are
 # skipped), so re-running after `git pull` is safe.
+#
+# --no-autostart installs the launchd jobs but disables them at boot
+# (they won't start until you `launchctl enable` them); --no-launchd skips
+# the launchd step entirely.
 #
 # Layout:
 #   repo (this checkout)   control/, engine/, host/macos/, webui/, patches/
@@ -87,9 +91,16 @@ case "$CMD" in
     exit 0
     ;;
   install)
-    [ "${2:-}" = "--no-launchd" ] && NO_LAUNCHD=1 || NO_LAUNCHD=0
+    NO_LAUNCHD=0; NO_AUTOSTART=0
+    for a in "${@:2}"; do
+      case "$a" in
+        --no-launchd)   NO_LAUNCHD=1 ;;
+        --no-autostart) NO_AUTOSTART=1 ;;
+        *) echo "unknown option: $a" >&2; exit 2 ;;
+      esac
+    done
     ;;
-  *) echo "usage: $0 [install [--no-launchd] | status | logs | uninstall [--purge]]" >&2; exit 2 ;;
+  *) echo "usage: $0 [install [--no-launchd] [--no-autostart]] | status | logs | uninstall [--purge]" >&2; exit 2 ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -223,8 +234,14 @@ if [ "$NO_LAUNCHD" = 1 ]; then
   warn "finish with: sudo $MACOS_DIR/install-launchd.sh"
 elif [ -t 0 ] || sudo -n true 2>/dev/null; then
   info "installing launchd jobs (root daemon + user agent)"
-  sudo "$MACOS_DIR/install-launchd.sh" --daemon
-  "$MACOS_DIR/install-launchd.sh" --agent
+  NO_AUTO_ARG=""; [ "$NO_AUTOSTART" = 1 ] && NO_AUTO_ARG="--no-autostart"
+  sudo "$MACOS_DIR/install-launchd.sh" $NO_AUTO_ARG --daemon
+  "$MACOS_DIR/install-launchd.sh" $NO_AUTO_ARG --agent
+  if [ "$NO_AUTOSTART" = 1 ]; then
+    info "jobs installed but disabled at boot — to start them later:"
+    echo "  sudo launchctl enable system/local.mdd.engine && sudo launchctl bootstrap system /Library/LaunchDaemons/local.mdd.engine.plist"
+    echo "  launchctl enable gui/$(id -u)/local.mdd.control && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.mdd.control.plist"
+  fi
 else
   warn "launchd install needs sudo and no terminal is attached."
   warn "finish the install with:"

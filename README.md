@@ -35,6 +35,12 @@ git clone https://github.com/Linwayne04/mdd-sim-gateway-mac.git && cd mdd-sim-ga
 ./install-macos.sh uninstall  # 卸载（--purge 连构建目录一并删除）
 ```
 
+不想开机自启的话，安装时加 `--no-autostart`（服务会装好但停用，之后随时可用 `launchctl enable` 开回）：
+
+```bash
+git clone https://github.com/Linwayne04/mdd-sim-gateway-mac.git && cd mdd-sim-gateway-mac && ./install-macos.sh install --no-autostart
+```
+
 ### 方法二：手动安装（逐步/开发者）
 
 `install-macos.sh` 的每一步都对应 `host/macos/` 下的独立脚本，可逐步执行：
