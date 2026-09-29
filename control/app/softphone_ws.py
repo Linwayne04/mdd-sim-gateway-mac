@@ -1,10 +1,12 @@
 """Relay the browser softphone's SIP-over-WebSocket to its line's engine.
 
 The browser only ever talks to the control surface origin (HTTPS, or a reverse proxy in front
-of it) and picks a line by path. Each engine's Asterisk serves plain WS on its docker-bridge
-address, which is never published to the host, so this relay is the only way in. That keeps a
-single TLS hop and a single certificate (the WebUI's), and one path per line instead of one
-host port per line.
+of it) and picks a line by path. Each engine's Asterisk serves plain WS on its address, which
+is never published to the host, so this relay is the only way in. That keeps a single TLS hop
+and a single certificate (the WebUI's), and one path per line instead of one host port per
+line. In Docker the container address alone tells lines apart (every line uses the default
+port); on the native macOS engine all lines share loopback, so the caller passes the line's
+allocated per-line port (config.instance_port).
 """
 from __future__ import annotations
 
@@ -18,8 +20,9 @@ from websockets.asyncio.client import connect
 log = logging.getLogger("mdd.softphone_ws")
 
 SUBPROTOCOL = "sip"
-# Asterisk's plain HTTP server inside the engine (http.conf bindport). Container-internal, so
-# every line uses the same port; the container address is what tells lines apart.
+# Default Asterisk plain-HTTP (http.conf bindport) port, used when the caller doesn't pass
+# the line's allocated port. Docker lines all use this; native macOS lines pass their own
+# (config.instance_port) since they share loopback.
 ENGINE_WS_PORT = 8088
 # One WebSocket message is one SIP message. A WebRTC INVITE with its SDP and ICE candidates is
 # a few KB, so this only bounds a misbehaving peer.
@@ -31,8 +34,8 @@ def path(iid: str) -> str:
     return f"/api/instances/{quote(str(iid), safe='')}/softphone/ws"
 
 
-def engine_url(ip: str) -> str:
-    return f"ws://{ip}:{ENGINE_WS_PORT}/ws"
+def engine_url(ip: str, port: int = ENGINE_WS_PORT) -> str:
+    return f"ws://{ip}:{port}/ws"
 
 
 def offers_sip(header: str | None) -> bool:

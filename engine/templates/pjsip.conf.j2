@@ -15,9 +15,9 @@ timer_b=128000
 type=transport
 protocol=tcp
 {% if pcscf_is_v6 %}
-bind=[::]:5060
+bind=[::]:{{ sip_port }}
 {% else %}
-bind=0.0.0.0:5060
+bind=0.0.0.0:{{ sip_port }}
 {% endif %}
 {% if bind_interface %}
 bind_interface={{ bind_interface }}

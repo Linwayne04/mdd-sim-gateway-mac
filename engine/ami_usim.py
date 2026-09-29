@@ -622,9 +622,13 @@ def main():
     cfg_endpoint = config.sections()[0]
     cfg_reader = config.get(cfg_endpoint, "reader")
     cfg_host = config.get(cfg_endpoint, "host")
+    # Per-line AMI port (instance.json is the single source; the template writes it here).
+    # Older rendered ini files predate the key — keep talking to the historical 5038.
+    cfg_port = int(config.get(cfg_endpoint, "port", fallback="5038"))
     cfg_username = config.get(cfg_endpoint, "username")
     cfg_secret = config.get(cfg_endpoint, "secret")
-    print(f"Endpoint={cfg_endpoint} reader={cfg_reader} host={cfg_host} user={cfg_username}")
+    print(f"Endpoint={cfg_endpoint} reader={cfg_reader} host={cfg_host}:{cfg_port} "
+          f"user={cfg_username}")
     write_status(state="STARTING")
     # Settle the binding question here, off the AKA path and before Asterisk can ask anything.
     intruder = probe_foreign_card_once(cfg_reader)
@@ -632,7 +636,7 @@ def main():
         print(f"reader holds ICCID {intruder}, this line is "
               f"{os.environ.get('USIM_ICCID', '').strip()} -- refusing to authenticate")
 
-    manager = Manager(loop=asyncio.get_event_loop(), host=cfg_host,
+    manager = Manager(loop=asyncio.get_event_loop(), host=cfg_host, port=cfg_port,
                       username=cfg_username, secret=cfg_secret)
 
     @manager.register_event("FullyBooted")

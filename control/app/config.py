@@ -237,14 +237,16 @@ def internal_event_token() -> str:
         return token
 
 # Port block allocation per instance index (avoids collisions across SIMs).
-# A block saved by an older version may also carry "webrtc". Despite the name, that was only
-# the browser softphone's WSS *signalling* port (8089, 8099, ...). Signalling now reaches the
-# engine through the control surface relay (softphone_ws), so the key is ignored. WebRTC
-# *media* (ICE, DTLS-SRTP) is unaffected and still uses the rtp_start..rtp_span range below.
-PORT_BASE = {"sip_udp": 5060, "sip_tls": 5061, "ami": 5038,
+# Every fixed service of the engine takes a per-line host port: SIP (UDP/TLS), the AMI
+# control socket, and "webrtc", the browser softphone's plain-WS signalling port that
+# Asterisk's http.conf listens on. Per-line ports matter on the native macOS engine where
+# all lines share loopback; Docker mode keeps working unchanged because the relay and the
+# engine both read the same instance.json. WebRTC *media* (ICE, DTLS-SRTP) is unaffected
+# and still uses the rtp_start..rtp_span range below.
+PORT_BASE = {"sip_udp": 5060, "sip_tls": 5061, "ami": 5038, "webrtc": 8088,
              "rtp_start": int(os.environ.get("MDD_RTP_BASE", "10000")),
              "rtp_end": int(os.environ.get("MDD_RTP_BASE", "10000")) + 1000}
-PORT_STRIDE = {"sip_udp": 10, "sip_tls": 10, "ami": 10,
+PORT_STRIDE = {"sip_udp": 10, "sip_tls": 10, "ami": 10, "webrtc": 10,
                "rtp_start": 2000, "rtp_end": 2000}
 
 
@@ -619,8 +621,12 @@ def rtp_span(block: dict) -> int:
 
 
 def _block_ports(block: dict) -> set[int]:
-    """Every host port a port-block occupies: the 3 fixed services + the RTP span."""
+    """Every host port a port-block occupies: the 4 fixed services + the RTP span."""
     used = {block["sip_udp"], block["sip_tls"], block["ami"]}
+    # Blocks saved before per-line WS signalling existed have no "webrtc" key; nothing to
+    # reserve for them (render_instance_json derives their engine port from the index).
+    if block.get("webrtc"):
+        used.add(block["webrtc"])
     used |= set(range(block["rtp_start"], block["rtp_start"] + rtp_span(block)))
     return used
 
@@ -715,11 +721,29 @@ def ports_from_sip_base(data: dict, sip_udp: int, exclude_iid: str | None = None
                          f"(conflict at {min(clash)}). Try a port at least 10 away, or "
                          f"use Automatic.")
     for port, name in ((block["sip_udp"], "SIP/UDP"), (block["sip_tls"], "SIP/TLS"),
-                       (block["ami"], "control")):
+                       (block["ami"], "control"), (block.get("webrtc"), "WebSocket")):
+        if port is None:
+            continue
         if not _host_port_free(port):
             raise ValueError(f"port {port} ({name}) is already in use on the host. "
                              f"Choose a different port or use Automatic.")
     return block
+
+
+def instance_port(inst: dict, key: str, default=None):
+    """The allocated host port for one service of a stored instance record.
+
+    New-style blocks carry every PORT_BASE key. A block saved before per-line WS
+    signalling existed has no "webrtc" key; derive it from the line's index at the
+    nominal stride so the control plane and the engine agree without rewriting stored
+    records. Returns `default` when the key is absent and cannot be derived.
+    """
+    value = (inst.get("ports") or {}).get(key)
+    if value is not None:
+        return int(value)
+    if key == "webrtc":
+        return int(PORT_BASE["webrtc"] + inst.get("index", 0) * PORT_STRIDE["webrtc"])
+    return default
 
 
 def next_index(data: dict) -> int:
@@ -1175,6 +1199,15 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         # picked above it would be unreachable from a LAN WebRTC client → no/one-way audio. Cap
         # rtp_end to the published span rather than the (larger) block-allocation rtp_end.
         "rtp_end": min(ports["rtp_end"], ports["rtp_start"] + rtp_span(ports) - 1),
+        # AMI/SIP/WS control ports flow to the engine so each line's Asterisk binds its own
+        # allocated ports — required on native macOS where every line shares loopback. Docker
+        # mode stays consistent because the relay and the engine read this same instance.json.
+        "ami_port": ports["ami"],
+        "sip_port": ports["sip_udp"],
+        "sip_tls_port": ports["sip_tls"],
+        # Legacy stored blocks predate per-line WS signalling; derive the port from the index.
+        "webrtc_ws_port": int(ports.get("webrtc") or
+                              PORT_BASE["webrtc"] + inst.get("index", 0) * PORT_STRIDE["webrtc"]),
         "sip": {
             "external": [],
             "advertise_address": advertise_address(settings),

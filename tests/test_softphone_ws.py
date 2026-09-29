@@ -72,7 +72,9 @@ class SoftphoneRelayTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main.auth, "session", return_value={"csrf": "x"} if session else None),
             patch.object(main.cfg, "get_instance", return_value=instance),
             patch.object(main.engine, "container_runtime", return_value=runtime),
-            patch.object(softphone_ws, "ENGINE_WS_PORT", self.port if port is None else port),
+            # The relay dials the line's allocated WS port (config.instance_port).
+            patch.object(main.cfg, "instance_port",
+                         return_value=self.port if port is None else port),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -174,9 +176,10 @@ class EngineListenerTests(unittest.TestCase):
             with self.subTest(**ctx):
                 self.assertIn("bindaddr=127.0.0.1\n", self.http_conf(**ctx))
 
-    def test_render_uses_the_relay_port(self):
+    def test_render_uses_the_instance_port_with_the_default_fallback(self):
         render = (Path(__file__).resolve().parents[1] / "engine" / "render.py").read_text()
-        self.assertIn(f'"webrtc_ws_port": {softphone_ws.ENGINE_WS_PORT},', render)
+        self.assertIn('"webrtc_ws_port": int(cfg.get("webrtc_ws_port") or '
+                      f'{softphone_ws.ENGINE_WS_PORT}),', render)
 
 
 if __name__ == "__main__":

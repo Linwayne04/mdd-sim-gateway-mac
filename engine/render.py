@@ -194,7 +194,7 @@ def build_context(cfg):
         "pcscf": pcscf,          # explicit or discovered
         # Address family of the discovered P-CSCF. The IMS core transport must bind the same
         # family or Asterisk cannot reach the P-CSCF over the tunnel: IPv6 P-CSCF (Telus, EE)
-        # -> bind [::]:5060; IPv4 P-CSCF (Vodafone UK, cp_mode=v4) -> bind 0.0.0.0:5060.
+        # -> bind [::]:<sip_port>; IPv4 P-CSCF (Vodafone UK, cp_mode=v4) -> bind 0.0.0.0:<sip_port>.
         "pcscf_is_v6": (":" in pcscf),
         "local_addr": cfg.get("local_addr") or container_ipv4(),
         # HTTP (browser-softphone WebSocket) bind address. On the native macOS engine the
@@ -218,12 +218,20 @@ def build_context(cfg):
         "sdp_owner": (sip.get("sdp_owner") or "-"),
         "ami_user": cfg.get("ami_user", "vowifi"),
         "ami_secret": ami_secret,
+        # Per-line control ports from instance.json (the single source of truth: the control
+        # plane allocates the block, the engine binds what it is told). Defaults match the
+        # historical hardcoded values for hand-authored configs.
+        "ami_port": int(cfg.get("ami_port") or 5038),
+        "sip_port": int(cfg.get("sip_port") or 5060),
+        "sip_tls_port": int(cfg.get("sip_tls_port") or 5061),
         "manager_url": cfg.get("manager_url", ""),
         "webrtc_enable": bool(webrtc.get("enable", True)),
         "webrtc_user": webrtc.get("username", "webrtc"),
         "webrtc_password": webrtc_password,
-        # Container-internal plain WS listener; must match control/app/softphone_ws.py.
-        "webrtc_ws_port": 8088,
+        # Container-internal plain WS listener. instance.json carries the line's allocated
+        # port (control plane and engine both read it); the fallback matches the historical
+        # 8088 for hand-authored configs.
+        "webrtc_ws_port": int(cfg.get("webrtc_ws_port") or 8088),
         "domain": cfg.get("domain", ""),
         # Host-reachable address to advertise to LOCAL SIP clients (Contact + SDP). The
         # container's own IP is not routable off the docker bridge, so in-dialog requests

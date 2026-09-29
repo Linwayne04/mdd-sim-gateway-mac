@@ -633,7 +633,8 @@ class Hub:
                 await self.drop_ami(iid)
             if not running or not ip:
                 return None
-            client = AmiClient(iid, ip, 5038, inst.get("ami_user", "vowifi"),
+            client = AmiClient(iid, ip, int(cfg.instance_port(inst, "ami", 5038)),
+                               inst.get("ami_user", "vowifi"),
                                inst["ami_secret"], realm=cfg.ims_realm(inst["mcc"], inst["mnc"]),
                                msisdn=inst.get("msisdn", ""), smsc=inst.get("smsc", ""))
             await client.connect()
@@ -6853,7 +6854,8 @@ async def ws_softphone(ws: WebSocket, iid: str):
     if not runtime["running"] or not runtime["ip"]:
         await ws.close(code=1013)
         return
-    await softphone_ws.relay(ws, softphone_ws.engine_url(runtime["ip"]))
+    await softphone_ws.relay(ws, softphone_ws.engine_url(
+        runtime["ip"], int(cfg.instance_port(inst, "webrtc", 8088))))
 
 
 # ----------------------------- engine event hook -----------------------------
