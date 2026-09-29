@@ -339,7 +339,10 @@ BRIDGE_SETTLE_SECONDS = 5.0
 # Grace between publishing "launching" and expecting systemd to report the updater unit as
 # active, so a loop pass that races a launch cannot retire the run it just started.
 UPDATE_LAUNCH_GRACE_SECONDS = 90.0
-COUNTRY_PROXY_LISTEN = os.environ.get("MDD_COUNTRY_PROXY_LISTEN", "172.17.0.1")
+# macOS port: the default is the Docker bridge address, which does not exist
+# on darwin — bind the per-country SOCKS listeners to loopback there instead.
+COUNTRY_PROXY_LISTEN = os.environ.get(
+    "MDD_COUNTRY_PROXY_LISTEN", "127.0.0.1" if sys.platform == "darwin" else "172.17.0.1")
 # The control plane's container in docker installs; install.sh owns the same name.
 CONTROL_CONTAINER = "mdd-sim-gateway-control"
 COUNTRY_PROXY_PORT_BASE = int(os.environ.get("MDD_COUNTRY_PROXY_PORT_BASE", "22000"))
@@ -3293,7 +3296,16 @@ def main():
     parser.add_argument("--interval", type=float, default=3)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    app = Orchestrator(args.data.resolve(), args.repo.resolve(), args.interval, args.dry_run)
+    # macOS port: swap in the Darwin orchestrator (route(8) + state-file route
+    # tracking, inert systemd/ModemManager hooks). Imported here, after the
+    # module-level constants above are bound, so the darwin COUNTRY_PROXY_LISTEN
+    # default and this dispatch stay in one clearly-marked block.
+    cls = Orchestrator
+    if sys.platform == "darwin":
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from host.macos.orchestrator_darwin import DarwinOrchestrator  # noqa: E402
+        cls = DarwinOrchestrator
+    app = cls(args.data.resolve(), args.repo.resolve(), args.interval, args.dry_run)
     signal.signal(signal.SIGTERM, lambda *_: app.request_stop())
     signal.signal(signal.SIGINT, lambda *_: app.request_stop())
     try: app.loop()

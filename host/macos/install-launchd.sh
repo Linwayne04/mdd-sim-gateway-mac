@@ -1,14 +1,16 @@
 #!/bin/bash
 # install-launchd.sh — render + install the launchd jobs for the macOS port:
-#   root LaunchDaemon  local.mdd.engine   (privileged engine daemon, socket-driven)
-#   user LaunchAgent   local.mdd.control  (control plane, runs as the login user)
+#   root LaunchDaemon  local.mdd.engine        (privileged engine daemon, socket-driven)
+#   root LaunchDaemon  local.mdd.orchestrator  (country egress: sing-box/Xray + host routes)
+#   user LaunchAgent   local.mdd.control       (control plane, runs as the login user)
 #
 # Usage:
-#   host/macos/install-launchd.sh [--no-autostart]     # install both (daemon part
-#                                                      # re-invokes itself through
+#   host/macos/install-launchd.sh [--no-autostart]     # install all (daemon parts
+#                                                      # re-invoke themselves through
 #                                                      # sudo when needed)
-#   host/macos/install-launchd.sh [--no-autostart] --daemon   # root daemon only
-#   host/macos/install-launchd.sh [--no-autostart] --agent    # user agent only
+#   host/macos/install-launchd.sh [--no-autostart] --daemon        # engine daemon only
+#   host/macos/install-launchd.sh [--no-autostart] --orchestrator  # orchestrator daemon only
+#   host/macos/install-launchd.sh [--no-autostart] --agent         # user agent only
 #
 # --no-autostart installs the jobs but `launchctl disable`s them and leaves
 # them unloaded: they stay stopped across reboots until you start them by hand:
@@ -107,6 +109,37 @@ install_daemon() {
   echo "engine daemon installed; socket: $BUILD_ROOT/data/run/engine.sock"
 }
 
+install_orchestrator() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "orchestrator install needs root — re-invoking via sudo"
+    if [ "$AUTOSTART" -eq 1 ]; then
+      exec sudo MDD_BUILD="$BUILD_ROOT" "$HERE/install-launchd.sh" --orchestrator
+    else
+      exec sudo MDD_BUILD="$BUILD_ROOT" "$HERE/install-launchd.sh" --no-autostart --orchestrator
+    fi
+  fi
+  local dst=/Library/LaunchDaemons/local.mdd.orchestrator.plist
+  mkdir -p "$BUILD_ROOT/logs"
+  render "$HERE/local.mdd.orchestrator.plist" "$dst"
+  chown root:wheel "$dst"
+  chmod 644 "$dst"
+  launchctl bootout system/local.mdd.orchestrator 2>/dev/null || true
+  if [ "$AUTOSTART" -eq 1 ]; then
+    launchctl enable system/local.mdd.orchestrator
+    bootstrap_retry system "$dst"
+  else
+    launchctl disable system/local.mdd.orchestrator
+    echo "orchestrator daemon installed but DISABLED at boot (--no-autostart)"
+    echo "to start it later:"
+    echo "  sudo launchctl enable system/local.mdd.orchestrator"
+    echo "  sudo launchctl bootstrap system $dst"
+    return 0
+  fi
+  sleep 1
+  launchctl print system/local.mdd.orchestrator | grep -E 'state|pid' || true
+  echo "orchestrator daemon installed; idles until the control plane configures country egress"
+}
+
 install_agent() {
   local dst="$USER_HOME/Library/LaunchAgents/local.mdd.control.plist"
   mkdir -p "$USER_HOME/Library/LaunchAgents" "$BUILD_ROOT/logs"
@@ -132,8 +165,9 @@ install_agent() {
 }
 
 case "${1:-all}" in
-  --daemon) install_daemon ;;
-  --agent)  install_agent ;;
-  all)      install_daemon; install_agent ;;
-  *) echo "usage: $0 [--no-autostart] [--daemon|--agent]" >&2; exit 2 ;;
+  --daemon)        install_daemon ;;
+  --orchestrator)  install_orchestrator ;;
+  --agent)         install_agent ;;
+  all)             install_daemon; install_orchestrator; install_agent ;;
+  *) echo "usage: $0 [--no-autostart] [--daemon|--orchestrator|--agent]" >&2; exit 2 ;;
 esac

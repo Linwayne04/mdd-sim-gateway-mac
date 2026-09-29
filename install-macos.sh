@@ -6,7 +6,7 @@
 # handled by the toolchain, and Homebrew/MacPorts prefixes are auto-detected.
 #
 # Usage:
-#   ./install-macos.sh install [--no-launchd] [--no-autostart]   # full install (default)
+#   ./install-macos.sh install [--no-launchd] [--no-autostart] [--no-egress]   # full install (default)
 #   ./install-macos.sh status
 #   ./install-macos.sh logs
 #   ./install-macos.sh uninstall [--purge]      # --purge also deletes the build root
@@ -52,6 +52,8 @@ case "$CMD" in
   status)
     launchctl print system/local.mdd.engine 2>/dev/null | grep -E 'state|pid' \
       || echo "engine daemon: not loaded"
+    launchctl print system/local.mdd.orchestrator 2>/dev/null | grep -E 'state|pid' \
+      || echo "orchestrator daemon: not loaded"
     uid="$(id -u)"
     launchctl print "gui/$uid/local.mdd.control" 2>/dev/null | grep -E 'state|pid' \
       || echo "control agent: not loaded"
@@ -61,7 +63,8 @@ case "$CMD" in
     exit 0
     ;;
   logs)
-    for f in "$BUILD_ROOT/logs/control.log" "$BUILD_ROOT/data/logs/engine-daemon.log"; do
+    for f in "$BUILD_ROOT/logs/control.log" "$BUILD_ROOT/data/logs/engine-daemon.log" \
+             "$BUILD_ROOT/logs/orchestrator.log"; do
       echo "== $f =="
       [ -f "$f" ] && tail -n 40 "$f" || echo "(missing)"
     done
@@ -91,16 +94,17 @@ case "$CMD" in
     exit 0
     ;;
   install)
-    NO_LAUNCHD=0; NO_AUTOSTART=0
+    NO_LAUNCHD=0; NO_AUTOSTART=0; NO_EGRESS=0
     for a in "${@:2}"; do
       case "$a" in
         --no-launchd)   NO_LAUNCHD=1 ;;
         --no-autostart) NO_AUTOSTART=1 ;;
+        --no-egress)    NO_EGRESS=1 ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
       esac
     done
     ;;
-  *) echo "usage: $0 [install [--no-launchd] [--no-autostart]] | status | logs | uninstall [--purge]" >&2; exit 2 ;;
+  *) echo "usage: $0 [install [--no-launchd] [--no-autostart] [--no-egress]] | status | logs | uninstall [--purge]" >&2; exit 2 ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -227,19 +231,37 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 6. launchd (the only root step)
+# 6. country-egress binaries (sing-box / Xray)
+# ---------------------------------------------------------------------------
+if [ "$NO_EGRESS" = 1 ]; then
+  warn "skipping country-egress binaries (--no-egress)"
+else
+  info "egress: fetching sing-box / Xray darwin binaries"
+  "$MACOS_DIR/build/fetch-egress.sh" "$BUILD_ROOT"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. launchd (the only root step)
 # ---------------------------------------------------------------------------
 if [ "$NO_LAUNCHD" = 1 ]; then
   warn "skipping launchd install (--no-launchd)"
   warn "finish with: sudo $MACOS_DIR/install-launchd.sh"
 elif [ -t 0 ] || sudo -n true 2>/dev/null; then
-  info "installing launchd jobs (root daemon + user agent)"
+  info "installing launchd jobs (root daemons + user agent)"
   NO_AUTO_ARG=""; [ "$NO_AUTOSTART" = 1 ] && NO_AUTO_ARG="--no-autostart"
   sudo "$MACOS_DIR/install-launchd.sh" $NO_AUTO_ARG --daemon
+  if [ "$NO_EGRESS" = 1 ]; then
+    warn "egress skipped — orchestrator daemon not installed (--no-egress)"
+  else
+    sudo "$MACOS_DIR/install-launchd.sh" $NO_AUTO_ARG --orchestrator
+  fi
   "$MACOS_DIR/install-launchd.sh" $NO_AUTO_ARG --agent
   if [ "$NO_AUTOSTART" = 1 ]; then
     info "jobs installed but disabled at boot — to start them later:"
     echo "  sudo launchctl enable system/local.mdd.engine && sudo launchctl bootstrap system /Library/LaunchDaemons/local.mdd.engine.plist"
+    if [ "$NO_EGRESS" != 1 ]; then
+      echo "  sudo launchctl enable system/local.mdd.orchestrator && sudo launchctl bootstrap system /Library/LaunchDaemons/local.mdd.orchestrator.plist"
+    fi
     echo "  launchctl enable gui/$(id -u)/local.mdd.control && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.mdd.control.plist"
   fi
 else

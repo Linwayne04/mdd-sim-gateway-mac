@@ -49,7 +49,7 @@ def instance_dir(iid):
     return os.path.join(MDD_DATA, "instances", iid)
 
 
-def supervisor_env(iid):
+def supervisor_env(iid, extra_env=None):
     prefix = instance_dir(iid)
     env = dict(os.environ)
     env.update({
@@ -68,6 +68,12 @@ def supervisor_env(iid):
         # that the supervisor links into the per-line var/lib/asterisk.
         "MDD_AST_DATA": os.path.join(MDD_AST_STAGE, "Library/Application Support/Asterisk"),
     })
+    # Per-line extras from the control plane's start request (e.g. SWU_EGRESS_PROXY
+    # for SOCKS country egress). String keys/values only; the control plane
+    # (engine_native.start) already filters, but this daemon is root — re-check.
+    for key, value in (extra_env or {}).items():
+        if isinstance(key, str) and isinstance(value, str) and key:
+            env[key] = value
     return env
 
 
@@ -91,14 +97,14 @@ def line_pgid(iid):
     return rec["pgid"]
 
 
-def _spawn(iid):
+def _spawn(iid, extra_env=None):
     prefix = instance_dir(iid)
     os.makedirs(os.path.join(prefix, "run"), exist_ok=True)
     os.makedirs(os.path.join(prefix, "logs"), exist_ok=True)
     console = open(os.path.join(prefix, "logs", "engine-console.log"), "ab")
     proc = subprocess.Popen(
         [os.path.join(MDD_VENV, "bin/python"), "-u", SUPERVISOR],
-        env=supervisor_env(iid),
+        env=supervisor_env(iid, extra_env),
         stdout=console, stderr=subprocess.STDOUT,
         start_new_session=True)   # own pgid => stop can kill the whole tree
     rec = {"proc": proc, "pgid": proc.pid, "started": time.time(),
@@ -176,11 +182,11 @@ def _kill_stale_supervisor(iid):
                 time.sleep(0.2)
 
 
-def do_start(iid):
+def do_start(iid, extra_env=None):
     if line_pgid(iid):
         return {"ok": True, "already_running": True}
     _kill_stale_supervisor(iid)
-    rec = _spawn(iid)
+    rec = _spawn(iid, extra_env)
     _watch_thread(iid, rec["proc"])
     return {"ok": True, "pid": rec["pgid"]}
 
@@ -290,7 +296,7 @@ def handle(req):
     action = req.get("action")
     iid = str(req.get("iid") or "")
     if action == "start":
-        return do_start(iid)
+        return do_start(iid, req.get("env") or {})
     if action == "stop":
         return do_stop(iid)
     if action == "status":

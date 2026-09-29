@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for the country-egress orchestrator daemon. Rendered by
+     host/macos/install-launchd.sh (placeholders @...@ replaced with the
+     actual home/repo/build paths) into /Library/LaunchDaemons. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.mdd.orchestrator</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@BUILD@/venv/bin/python</string>
+        <string>-u</string>
+        <string>@REPO@/host/mdd_orchestrator.py</string>
+        <string>--data</string>
+        <string>@BUILD@/data</string>
+        <string>--repo</string>
+        <string>@REPO@</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MDD_DATA</key>
+        <string>@BUILD@/data</string>
+        <key>MDD_REPO</key>
+        <string>@REPO@</string>
+        <key>MDD_SINGBOX_BIN</key>
+        <string>@BUILD@/egress/bin/sing-box</string>
+        <key>MDD_XRAY_BIN</key>
+        <string>@BUILD@/egress/bin/xray</string>
+        <key>MDD_COUNTRY_PROXY_LISTEN</key>
+        <string>127.0.0.1</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/local/bin:@BUILD@/egress/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@BUILD@/logs/orchestrator.log</string>
+    <key>StandardErrorPath</key>
+    <string>@BUILD@/logs/orchestrator.log</string>
+</dict>
+</plist>
