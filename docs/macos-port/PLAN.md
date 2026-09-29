@@ -107,6 +107,23 @@ notify HTTP 回調、AMI 5038、軟電話 WS——只是「容器管理」換成
     ~~(b) 批准安裝 mitshell/card~~(已裝,`card-0.3`,swu_ike.USIM 驗證可匯入);
     (c) 之後跑 E2E(啟動線路 → 註冊 → 簡訊 → 瀏覽器通話)。
 - **Phase 3 — 多線 + 國家出口**:10 線並發、sing-box darwin TUN、`route` 固定 ePDG。
+  - ✅ **per-line port 偏移（2026-09-29, d3b499b）**：instance.json 成為端口唯一事實來源
+    （ami_port/sip_port/sip_tls_port/webrtc_ws_port,預設 5038/5060/5061/8088 與舊行為逐位
+    相同）；模板 manager.conf/pjsip.conf/ami_usim.ini 綁定分配埠;控制面 AMI client 與
+    softphone WS relay 由 `config.instance_port` 解析。legacy port block 無 webrtc key 時
+    以 index 推算（8088+index*10）。雙讀卡器實測並存待硬體。
+  - ✅ **sing-box darwin egress（2026-09-29, 2526952）**：`fetch-egress.sh`（sing-box
+    1.13.15 + Xray 26.3.27 官方 darwin 資產,sha256 鎖定,`--no-egress` 可略過）+
+    `orchestrator_darwin.py`（route(8) 固定 ePDG,managed-routes.json 狀態檔,無 proto 標籤）
+    + `local.mdd.orchestrator` launchd job（KeepAlive,MDD_SINGBOX_BIN/XRAY_BIN env）。
+    engine.py native 分支啟動前先跑 `egress.ensure_line`（fail-closed 與容器路徑一致）,
+    SOCKS5 exit 的 `SWU_EGRESS_PROXY` 經 engine_native `env` 參數 → daemon socket start
+    請求 → supervisor_env 合併 → swu_ike。COUNTRY_PROXY_LISTEN darwin 預設 127.0.0.1。
+    已驗證：orchestrator 實機 reconcile（14 線全 direct）、fetch 腳本本機雙二進位驗證。
+    端到端真代理繞國家待使用者訂閱。
+  - ✅ **From:"undefined" display-name bug（2026-09-29, ecbf48d）**：根因 = 上游
+    pjsip.conf.j2 字面量 `callerid=undefined <msisdn>`；新增 per-line `sip.caller_name`
+    （預設空 = From 只帶號碼）。
 - **Phase 4 — modem 整合**:AT+CSIM 橋接 modem SIM、AT 簡訊/通話、4G 數據(networksetup)。
 - **Phase 5 — 安裝/更新/打包**：install-macos.sh、launchd 全套、mdd_update 的 launchd 化、
   備份/診斷/日誌(journalctl → log show / 檔案日誌)。
@@ -116,7 +133,20 @@ notify HTTP 回調、AMI 5038、軟電話 WS——只是「容器管理」換成
     （版次/sha256 全鎖定）+ `host/macos/install-launchd.sh`
     （plist 模板渲染，取代寫死路徑的 install-engine-daemon.sh）。
     注意：全新機器與 arm64 尚未實機驗證（僅本機冪等重跑驗證）。
-  - 待辦：mdd_update 的 launchd 化、備份/診斷。
+  - ✅ **mdd_update launchd 化 + 子命令對齊 + darwin 診斷（2026-09-29, 8c2ba4e）**：
+    `host/macos/mdd_update.py`（root,stdlib-only：讀 update-request.json → 備份 tar
+    （bsdtar --exclude 前於 operands）→ 拒絕 dirty tree 後 fetch+checkout tag →
+    條件重建（fetch-sources/build-asterisk 加 .built-rev/.pinned-revs 戳記,rev 未變
+    不重建）→ kickstart engine+control → update-status.json 每步原子寫;完成與失敗
+    都 consume request,a0c556e）+ `local.mdd.update` launchd job（StartInterval 300,
+    RunAtLoad false,無 WatchPaths——status 寫入會自觸發）。
+    install-macos.sh 新增 reload/start/stop/restart/enable-autostart/
+    disable-autostart/diagnose/update [--version X] [--check] 子命令;
+    install-launchd.sh 加 `--update` job;orchestrator 偵測到 request 時 kickstart
+    update job（不consume,與 mdd_update 分工）。sysinfo darwin 分支
+    （system_profiler 取機型/序列）。已實機驗證：三 root job 載入、update daemon
+    空轉 exit 0、line 3 重啟後註冊正常（40b7a17 亦修 softphone listener 測試的
+    http_bind_addr 傳參）。
 
 ## 5. 程式組織原則
 
