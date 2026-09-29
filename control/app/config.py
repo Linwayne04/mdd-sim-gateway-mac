@@ -1149,6 +1149,9 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         "reader_port": inst.get("reader_port", ""),
         "iccid": inst.get("iccid", ""),
         "msisdn": inst.get("msisdn", ""),
+        # Optional display name for outbound callerid (sip.caller_name). Empty renders a
+        # bare callerid=<msisdn>; the engine template must never emit a literal name.
+        "caller_name": str(sip.get("caller_name", "")),
         "smsc": inst.get("smsc", ""),
         "pcscf": inst.get("pcscf", ""),
         # Usually blank so the Engine derives the carrier ePDG hostname.  In an

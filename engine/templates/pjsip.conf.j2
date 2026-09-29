@@ -157,8 +157,10 @@ rewrite_contact=yes
 ; left on (the default) Asterisk would try to re-INVITE the two ends to talk directly, which
 ; can't work → no audio. (volte_ims already has direct_media=no.)
 direct_media=no
-{% if msisdn %}
-callerid=undefined <{{ msisdn }}>
+{% if caller_name and msisdn %}
+callerid={{ caller_name }} <{{ msisdn }}>
+{% elif msisdn %}
+callerid=<{{ msisdn }}>
 {% endif %}
 
 [auth-local](!)

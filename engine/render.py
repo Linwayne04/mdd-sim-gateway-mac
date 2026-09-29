@@ -189,6 +189,7 @@ def build_context(cfg):
         "epdg": epdg,
         "nai": nai,
         "msisdn": cfg.get("msisdn", ""),
+        "caller_name": str(cfg.get("caller_name", "")),
         "smsc": cfg.get("smsc", ""),
         "pcscf": pcscf,          # explicit or discovered
         # Address family of the discovered P-CSCF. The IMS core transport must bind the same
