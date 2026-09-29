@@ -36,7 +36,7 @@ def _socket_path() -> str:
 
 class DaemonUnavailable(RuntimeError):
     """The root engine daemon is not installed/running (see
-    host/macos/install-engine-daemon.sh)."""
+    host/macos/install-launchd.sh)."""
 
 
 def _request(payload: dict, timeout: float = 30) -> dict:
@@ -44,7 +44,7 @@ def _request(payload: dict, timeout: float = 30) -> dict:
     if not os.path.exists(path):
         raise DaemonUnavailable(
             f"engine daemon socket not found at {path}; "
-            "run: sudo host/macos/install-engine-daemon.sh")
+            "run: sudo host/macos/install-launchd.sh --daemon")
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
