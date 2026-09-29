@@ -162,6 +162,7 @@ class EngineListenerTests(unittest.TestCase):
                           trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=True)
         return env.get_template("http.conf.j2").render(
             **{"webrtc_enable": True, "local_addr": "172.17.0.3",
+               "http_bind_addr": "172.17.0.3",
                "webrtc_ws_port": softphone_ws.ENGINE_WS_PORT, **ctx})
 
     def test_listens_in_plain_on_the_bridge_address_at_the_relay_port(self):
@@ -172,7 +173,9 @@ class EngineListenerTests(unittest.TestCase):
         self.assertNotIn("0.0.0.0", conf)
 
     def test_stays_on_loopback_without_a_softphone_or_bridge_address(self):
-        for ctx in ({"webrtc_enable": False}, {"local_addr": ""}):
+        # Mirrors render.py: an empty bridge address makes http_bind_addr falsy,
+        # so the template falls back to loopback.
+        for ctx in ({"webrtc_enable": False}, {"local_addr": "", "http_bind_addr": ""}):
             with self.subTest(**ctx):
                 self.assertIn("bindaddr=127.0.0.1\n", self.http_conf(**ctx))
 
