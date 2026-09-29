@@ -45,6 +45,13 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
   # Rendered agent must belong to the invoking user, not root.
   USER_NAME="$SUDO_USER"
   USER_HOME="$(eval echo "~$SUDO_USER")"
+elif [ "$(id -u)" -eq 0 ]; then
+  # Invoked via osascript 'do shell script ... with administrator privileges'
+  # (no sudo, no SUDO_USER): derive the target user from the build-root owner.
+  # The daemon chowns its control socket to @USER@ — rendering 'root' here
+  # locked the control plane out with EACCES on the WebUI.
+  USER_NAME="$(stat -f %Su "$BUILD_ROOT" 2>/dev/null || echo root)"
+  USER_HOME="$(eval echo "~$USER_NAME")"
 else
   USER_NAME="$(id -un)"
   USER_HOME="$HOME"
