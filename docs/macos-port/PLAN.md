@@ -102,13 +102,21 @@ notify HTTP 回調、AMI 5038、軟電話 WS——只是「容器管理」換成
     `host/macos/engine_supervisor.py`(entrypoint.sh 的 Python 移植)、
     `host/macos/mdd_engine_daemon.py` + LaunchDaemon plist + install 腳本、
     控制面 `engine_native.py` socket 後端(engine.py/main.py/runtime.py 分派)。
-  - 待使用者:(a) `sudo host/macos/install-engine-daemon.sh`;
+  - ~~待使用者:(a) `sudo host/macos/install-engine-daemon.sh`;~~
+    (a) 已完成（daemon plist 已由 install-launchd.sh 模板化取代）；
     ~~(b) 批准安裝 mitshell/card~~(已裝,`card-0.3`,swu_ike.USIM 驗證可匯入);
     (c) 之後跑 E2E(啟動線路 → 註冊 → 簡訊 → 瀏覽器通話)。
 - **Phase 3 — 多線 + 國家出口**:10 線並發、sing-box darwin TUN、`route` 固定 ePDG。
 - **Phase 4 — modem 整合**:AT+CSIM 橋接 modem SIM、AT 簡訊/通話、4G 數據(networksetup)。
-- **Phase 5 — 安裝/更新/打包**:install-macos.sh、launchd 全套、mdd_update 的 launchd 化、
+- **Phase 5 — 安裝/更新/打包**：install-macos.sh、launchd 全套、mdd_update 的 launchd 化、
   備份/診斷/日誌(journalctl → log show / 檔案日誌)。
+  - ✅ **install-macos.sh + launchd 安裝（2026-09-29）**：`install-macos.sh`
+    （install/status/logs/uninstall，冪等，brew/port 自動偵測，Intel+arm64）
+    + `host/macos/build/{fetch-sources,build-support-libs,build-asterisk}.sh`
+    （版次/sha256 全鎖定）+ `host/macos/install-launchd.sh`
+    （plist 模板渲染，取代寫死路徑的 install-engine-daemon.sh）。
+    注意：全新機器與 arm64 尚未實機驗證（僅本機冪等重跑驗證）。
+  - 待辦：mdd_update 的 launchd 化、備份/診斷。
 
 ## 5. 程式組織原則
 

@@ -1,35 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for the privileged engine daemon. Rendered by
+     host/macos/install-launchd.sh (placeholders @...@ replaced with the
+     actual home/repo/build paths) into /Library/LaunchDaemons. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>local.mdd.engine</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/linwayne/mdd-macos-build/venv/bin/python</string>
+        <string>@BUILD@/venv/bin/python</string>
         <string>-u</string>
-        <string>/Users/linwayne/mdd-sim-gateway/host/macos/mdd_engine_daemon.py</string>
+        <string>@REPO@/host/macos/mdd_engine_daemon.py</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>MDD_DATA</key>
-        <string>/Users/linwayne/mdd-macos-build/data</string>
+        <string>@BUILD@/data</string>
         <key>MDD_REPO</key>
-        <string>/Users/linwayne/mdd-sim-gateway</string>
+        <string>@REPO@</string>
         <key>MDD_VENV</key>
-        <string>/Users/linwayne/mdd-macos-build/venv</string>
+        <string>@BUILD@/venv</string>
         <key>MDD_AST_STAGE</key>
-        <string>/Users/linwayne/mdd-macos-build/asterisk-stage</string>
+        <string>@BUILD@/asterisk-stage</string>
         <key>MDD_SOCKET_USER</key>
-        <string>linwayne</string>
+        <string>@USER@</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/linwayne/mdd-macos-build/data/logs/engine-daemon.log</string>
+    <string>@BUILD@/data/logs/engine-daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/linwayne/mdd-macos-build/data/logs/engine-daemon.log</string>
+    <string>@BUILD@/data/logs/engine-daemon.log</string>
 </dict>
 </plist>

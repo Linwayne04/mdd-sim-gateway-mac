@@ -13,6 +13,24 @@
   <a href="https://github.com/MddIdd/mdd-sim-gateway/discussions">Discussions</a>
 </p>
 
+> 🍎 **This is the native macOS port (fork)**: this repo is the `macos-port` branch of [MddIdd/mdd-sim-gateway](https://github.com/MddIdd/mdd-sim-gateway) — a LaunchDaemon engine, utun tunnel and natively compiled Asterisk replace the Docker containers. See [docs/macos-port/PLAN.md](docs/macos-port/PLAN.md) for the port plan and progress; the upstream Docker/Linux usage is unchanged.
+
+## macOS install (native port)
+
+For macOS 13+ on **both Intel and Apple Silicon** — every component is compiled from source on the host (no prebuilt binaries), with Homebrew and MacPorts prefixes auto-detected. You need a USB PC/SC reader and a SIM with Wi-Fi Calling enabled. Prerequisites: Xcode Command Line Tools (`xcode-select --install`), Homebrew or MacPorts, git.
+
+**One-liner:**
+
+```bash
+git clone https://github.com/Linwayne04/mdd-sim-gateway-mac.git && cd mdd-sim-gateway-mac && ./install-macos.sh install
+```
+
+`install-macos.sh` checks/installs dependencies, fetches pinned sources (pjproject / Asterisk / AMR codec libraries, all version- and SHA-256-locked), compiles Asterisk with the macOS patches, builds the Python venv and WebUI, and installs the launchd jobs (only the engine daemon step asks for sudo). It is idempotent — re-run it after `git pull`. Then open `https://127.0.0.1:8443`, create the admin account, plug in the reader and add a line. (`status` / `logs` / `uninstall` subcommands mirror the upstream installer.)
+
+**Manual install:** each step maps to a script under `host/macos/build/` plus `host/macos/install-launchd.sh` — see the Chinese README's step-by-step section or `install-macos.sh` itself.
+
+Known limits (port in progress): MMS untested; multi-line concurrency and country egress are next phases; launchd-based update/backup tooling is not done yet.
+
 MDD Sim Gateway is a self-hosted multi-SIM communications gateway. It installs directly on Debian, Ubuntu and Armbian ARM64 hosts, or runs entirely in containers on any Linux host with Docker Compose, including a Synology or other NAS. It brings cellular modems, USB smart-card readers, IMS, EAP-AKA, eSIM, ModemManager and sing-box into one bilingual Web console.
 
 | Real SIM authentication | Calls and SMS | Multi-modem control | Isolated country exits |
@@ -25,7 +43,9 @@ MDD Sim Gateway is a self-hosted multi-SIM communications gateway. It installs d
 
 <p align="center">Overview → device management → browser calling → messages → balance & keeping → system updates · All identities and content shown are fictional demo data</p>
 
-## Quick install
+## Quick install (upstream Linux/Docker deployment)
+
+> The following covers the upstream Linux/Docker deployment; for the native macOS install see "macOS install" above.
 
 There are two ways to deploy. Both provide the same features; choose by host:
 

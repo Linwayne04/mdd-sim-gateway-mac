@@ -15,6 +15,40 @@
 
 > 🍎 **這是 macOS 原生移植版（fork）**：本倉庫是 [MddIdd/mdd-sim-gateway](https://github.com/MddIdd/mdd-sim-gateway) 的 macOS 原生移植分支（`macos-port`）——以 LaunchDaemon 引擎、utun 隧道與原生編譯的 Asterisk 取代 Docker 容器。移植計畫與進度見 [docs/macos-port/PLAN.md](docs/macos-port/PLAN.md)；上游的 Docker/Linux 用法維持不變。
 
+## macOS 安装（原生移植）
+
+适用于 macOS 13+，**Intel 与 Apple Silicon 均支持**——所有组件都在本机源码编译（无预编译二进制文件），Homebrew 与 MacPorts 路径自动识别。需要 USB PC/SC 读卡器，以及已开通 Wi-Fi Calling 的 SIM。前置条件：Xcode 命令行工具（`xcode-select --install`）、Homebrew 或 MacPorts、git。
+
+### 方法一：一行命令（推荐）
+
+```bash
+git clone https://github.com/Linwayne04/mdd-sim-gateway-mac.git && cd mdd-sim-gateway-mac && ./install-macos.sh install
+```
+
+`install-macos.sh` 自动完成：依赖检查与安装 → 拉取固定版本源码（pjproject / Asterisk / AMR 编解码库，全部带版本与 SHA-256 锁定）→ 原生编译 Asterisk（自动套用 macOS 修补）→ Python venv → WebUI 构建 → 安装 launchd 服务。除引擎守护进程（LaunchDaemon）外的所有环节都以普通用户运行，只有该步会请求 sudo。整体幂等，`git pull` 后重跑即可增量补齐。
+
+装完后打开 `https://127.0.0.1:8443` 创建管理员账号，插入 USB 读卡器、添加线路并启动即可。
+
+```bash
+./install-macos.sh status     # 引擎/控制面运行状态
+./install-macos.sh logs       # 查看日志
+./install-macos.sh uninstall  # 卸载（--purge 连构建目录一并删除）
+```
+
+### 方法二：手动安装（逐步/开发者）
+
+`install-macos.sh` 的每一步都对应 `host/macos/` 下的独立脚本，可逐步执行：
+
+1. 安装依赖。Homebrew：`brew install bison flex pkg-config jansson libxml2 sqlite openssl ncurses speex speexdsp libogg libvorbis ossp-uuid libsrtp python@3.12 node autoconf automake libtool`；MacPorts 对应包名为 `port install bison flex pkgconfig jansson libxml2 sqlite3 openssl3 ncurses speex speexdsp libogg libvorbis ossp-uuid libsrtp python312 nodejs22 autoconf automake libtool`。
+2. `host/macos/build/fetch-sources.sh` — 下载固定版本源码（~/mdd-macos-build）。
+3. `host/macos/build/build-support-libs.sh` — 编译 AMR 编解码支持库到本地 stage。
+4. `host/macos/build/build-asterisk.sh` — 编译并暂存 Asterisk（耗时最长）。
+5. 创建 venv 并 `pip install -r control/requirements.txt`。
+6. `cd webui && npm ci && npm run build`。
+7. `sudo host/macos/install-launchd.sh --daemon` 与 `host/macos/install-launchd.sh --agent` — 安装引擎守护进程与控制面 LaunchAgent。
+
+已知限制（移植进行中）：MMS 收发未验证；多线路并发与国家出口路由为下一阶段；自动更新/备份的 launchd 化未完成。详见 [docs/macos-port/PLAN.md](docs/macos-port/PLAN.md)。
+
 MDD Sim Gateway 是自托管的多 SIM 通信网关，可以直接安装在 Debian / Ubuntu / Armbian ARM64 主机上，也可以在任何能运行 Docker Compose 的 Linux 主机上以全容器方式运行，包括群晖等 NAS。它将蜂窝模块、USB 读卡器、IMS、EAP-AKA、eSIM、ModemManager 和 sing-box 整合进一个中英文 Web 控制台。
 
 | 真实 SIM 鉴权 | 通话与短信 | 多模块管理 | 独立国家出口 |
@@ -27,7 +61,9 @@ MDD Sim Gateway 是自托管的多 SIM 通信网关，可以直接安装在 Debi
 
 <p align="center">概览 → 设备管理 → 浏览器通话 → 短信 → 余额与保号 → 系统更新　·　界面中的身份与内容均为虚构演示数据</p>
 
-## 快速安装
+## 快速安装（上游 Linux/Docker 部署）
+
+> 以下为上游原始的 Linux/Docker 部署方式；macOS 原生安装请见上文「macOS 安装（原生移植）」。
 
 有两种部署方式，功能相同，按宿主机选择：
 

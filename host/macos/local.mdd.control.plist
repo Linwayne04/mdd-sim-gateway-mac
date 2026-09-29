@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for the user-session control plane agent. Rendered by
+     host/macos/install-launchd.sh (placeholders @...@ replaced with the
+     actual home/repo/build paths) into ~/Library/LaunchAgents. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.mdd.control</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@REPO@/host/macos/run-control.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MDD_BIND</key>
+        <string>0.0.0.0</string>
+        <key>MDD_DATA</key>
+        <string>@BUILD@/data</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@BUILD@/logs/control.log</string>
+    <key>StandardErrorPath</key>
+    <string>@BUILD@/logs/control.log</string>
+    <key>WorkingDirectory</key>
+    <string>@REPO@</string>
+</dict>
+</plist>
