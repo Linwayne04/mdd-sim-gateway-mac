@@ -7,8 +7,10 @@
 #
 # Usage:
 #   ./install-macos.sh install [--no-launchd] [--no-autostart]   # full install (default)
-#   ./install-macos.sh status
-#   ./install-macos.sh logs
+#   ./install-macos.sh status | logs | diagnose
+#   ./install-macos.sh reload | start | stop | restart          # launchd jobs
+#   ./install-macos.sh enable-autostart | disable-autostart
+#   ./install-macos.sh update [--version X] [--check]           # one-click update
 #   ./install-macos.sh uninstall [--purge]      # --purge also deletes the build root
 #
 # Run as a normal user — the script only escalates via sudo for the root
@@ -47,6 +49,169 @@ fi
 # ---------------------------------------------------------------------------
 # subcommands that don't need the full flow
 # ---------------------------------------------------------------------------
+DAEMON_LABEL=system/local.mdd.engine
+
+# Root launchctl verbs (daemon domain). Use sudo when it works
+# non-interactively, or when a tty allows a prompt; otherwise print the exact
+# manual command and return 1 — never hang waiting for a password.
+if sudo -n true 2>/dev/null || [ -t 0 ]; then
+  SUDO_LCTL=sudo
+else
+  SUDO_LCTL=""
+fi
+
+daemon_lctl() {
+  if [ -n "$SUDO_LCTL" ]; then
+    $SUDO_LCTL launchctl "$@"
+  else
+    warn "cannot sudo non-interactively — run manually:"
+    warn "  sudo launchctl $*"
+    return 1
+  fi
+}
+
+bootstrap_retry() {
+  # bootstrap <domain> <plist>; bootout is async, retry a few times.
+  local domain="$1" plist="$2" attempt=1
+  while [ "$attempt" -le 4 ]; do
+    if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt+1))
+  done
+  echo "bootstrap failed for $plist in $domain" >&2
+  return 1
+}
+
+daemon_bootstrap_retry() {
+  # bootstrap_retry through the sudo path (root daemon domain).
+  local domain="$1" plist="$2" attempt=1
+  while [ "$attempt" -le 4 ]; do
+    if daemon_lctl bootstrap "$domain" "$plist" 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt+1))
+  done
+  warn "bootstrap failed for $plist in $domain (see manual commands above)"
+  return 1
+}
+
+job_state() {
+  launchctl print "$1" 2>/dev/null | grep -E 'state|pid' || echo "$1: not loaded"
+}
+
+start_jobs() {
+  local uid; uid="$(id -u)"
+  local agent_plist="$HOME/Library/LaunchAgents/local.mdd.control.plist"
+  if [ -f /Library/LaunchDaemons/local.mdd.engine.plist ]; then
+    daemon_lctl enable system/local.mdd.engine || true
+    daemon_bootstrap_retry system /Library/LaunchDaemons/local.mdd.engine.plist || true
+  else
+    warn "engine daemon plist not installed — run: sudo $MACOS_DIR/install-launchd.sh --daemon"
+  fi
+  if [ -f "$agent_plist" ]; then
+    # Enable BEFORE bootstrap: a disabled service refuses bootstrap.
+    launchctl enable "gui/$uid/local.mdd.control" || true
+    bootstrap_retry "gui/$uid" "$agent_plist" || warn "control agent bootstrap failed"
+  else
+    warn "control agent plist not installed — run: $MACOS_DIR/install-launchd.sh --agent"
+  fi
+}
+
+stop_jobs() {
+  local uid; uid="$(id -u)"
+  daemon_lctl bootout system/local.mdd.engine || true
+  launchctl bootout "gui/$uid/local.mdd.control" 2>/dev/null || true
+}
+
+scrub() {
+  # Best-effort masking of tokens/secrets in report output.
+  sed -E \
+    -e 's/([Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy])=[^[:space:]]+/\1=***/g' \
+    -e 's/Bearer[[:space:]]+[0-9a-fA-F]{8,}/Bearer ***/g'
+}
+
+diagnose() {
+  local uid; uid="$(id -u)"
+  {
+    echo "== launchd jobs =="
+    job_state system/local.mdd.engine
+    job_state "gui/$uid/local.mdd.control"
+    echo
+    echo "== PC/SC readers (USB) =="
+    system_profiler -timeout 15 -detailLevel mini SPUSBDataType 2>/dev/null \
+      | grep -i -B2 -A2 -E 'ccid|smart.?card|reader|pcsc' \
+      || echo "(none found or system_profiler unavailable)"
+    echo
+    echo "== engine socket =="
+    if [ -S "$BUILD_ROOT/data/run/engine.sock" ]; then
+      echo "present: $BUILD_ROOT/data/run/engine.sock"
+    else
+      echo "(missing)"
+    fi
+    echo
+    echo "== sockets (5038 5060 5061 8088 8443 4500) =="
+    netstat -an | grep -E '\.(5038|5060|5061|8088|8443|4500) ' || echo "(none listening)"
+    echo
+    echo "== disk ($BUILD_ROOT) =="
+    df -h "$BUILD_ROOT" | tail -1
+    echo
+    echo "== recent logs =="
+    local f
+    for f in "$BUILD_ROOT/logs/control.log" "$BUILD_ROOT/data/logs/engine-daemon.log"; do
+      echo "-- $f --"
+      [ -f "$f" ] && tail -n 30 "$f" || echo "(missing)"
+      echo
+    done
+    echo "== repo ($REPO) =="
+    git -C "$REPO" branch --show-current
+    git -C "$REPO" log --oneline -3
+  } | scrub
+}
+
+cmd_update() {
+  local version="latest" check=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --version) version="${2:-}"; [ -n "$version" ] || die "--version needs a value"; shift 2 ;;
+      --check)   check=1; shift ;;
+      *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+  done
+  local orch="$BUILD_ROOT/data/orchestrator"
+  if [ "$check" -eq 1 ]; then
+    if [ -f "$orch/update-request.json" ]; then
+      echo "== update-request.json =="
+      cat "$orch/update-request.json"
+    else
+      echo "no update request"
+    fi
+    if [ -f "$orch/update-status.json" ]; then
+      echo "== update-status.json =="
+      cat "$orch/update-status.json"
+    fi
+    exit 0
+  fi
+  mkdir -p "$orch"
+  # Atomic write via temp + mv. Extra keys the WebUI adds (network fields,
+  # asset_sizes) are optional — the updater only needs version/repository.
+  local tmp="$orch/.update-request.json.tmp"
+  printf '{\n  "version": "%s",\n  "repository": "Linwayne04/mdd-sim-gateway-mac",\n  "requested_at": %s,\n  "source": "cli"\n}\n' \
+    "$version" "$(date +%s)" > "$tmp"
+  mv "$tmp" "$orch/update-request.json"
+  echo "update request written: version=$version repository=Linwayne04/mdd-sim-gateway-mac"
+  echo "the update daemon (system/local.mdd.update) picks it up within 5 minutes."
+  if [ -n "$SUDO_LCTL" ]; then
+    $SUDO_LCTL launchctl kickstart system/local.mdd.update \
+      && echo "update daemon kickstarted" || warn "kickstart failed — it will still run on its 5-minute interval"
+  else
+    warn "cannot sudo non-interactively — run manually:"
+    warn "  sudo launchctl kickstart system/local.mdd.update"
+  fi
+}
+
 CMD="${1:-install}"
 case "$CMD" in
   status)
@@ -90,6 +255,58 @@ case "$CMD" in
     fi
     exit 0
     ;;
+  reload)
+    uid="$(id -u)"
+    info "kickstarting launchd jobs"
+    daemon_lctl kickstart -k system/local.mdd.engine || true
+    launchctl kickstart -k "gui/$uid/local.mdd.control" 2>/dev/null || true
+    job_state system/local.mdd.engine
+    job_state "gui/$uid/local.mdd.control"
+    exit 0
+    ;;
+  start)
+    info "starting launchd jobs (enable + bootstrap)"
+    start_jobs
+    exit 0
+    ;;
+  stop)
+    info "stopping launchd jobs (bootout)"
+    stop_jobs
+    exit 0
+    ;;
+  restart)
+    info "restarting launchd jobs"
+    stop_jobs
+    start_jobs
+    exit 0
+    ;;
+  enable-autostart)
+    uid="$(id -u)"
+    info "enabling launchd jobs at login/boot"
+    daemon_lctl enable system/local.mdd.engine || true
+    launchctl enable "gui/$uid/local.mdd.control" || true
+    echo "note: disabled jobs need 'enable' then 'bootstrap' before they run;"
+    echo "if a job is currently unloaded, run: $0 start"
+    exit 0
+    ;;
+  disable-autostart)
+    uid="$(id -u)"
+    info "disabling launchd jobs at login/boot"
+    daemon_lctl disable system/local.mdd.engine || true
+    launchctl disable "gui/$uid/local.mdd.control" || true
+    echo "note: disabled jobs need 'enable' then 'bootstrap' to run again:"
+    echo "  sudo launchctl enable system/local.mdd.engine && sudo launchctl bootstrap system /Library/LaunchDaemons/local.mdd.engine.plist"
+    echo "  launchctl enable gui/$uid/local.mdd.control && launchctl bootstrap gui/$uid ~/Library/LaunchAgents/local.mdd.control.plist"
+    exit 0
+    ;;
+  diagnose)
+    diagnose
+    exit 0
+    ;;
+  update)
+    cmd_update "${@:2}"
+    exit 0
+    ;;
   install)
     NO_LAUNCHD=0; NO_AUTOSTART=0
     for a in "${@:2}"; do
@@ -100,7 +317,7 @@ case "$CMD" in
       esac
     done
     ;;
-  *) echo "usage: $0 [install [--no-launchd] [--no-autostart]] | status | logs | uninstall [--purge]" >&2; exit 2 ;;
+  *) echo "usage: $0 [install [--no-launchd] [--no-autostart]] | status | logs | reload | start | stop | restart | enable-autostart | disable-autostart | diagnose | update [--version X] [--check] | uninstall [--purge]" >&2; exit 2 ;;
 esac
 
 # ---------------------------------------------------------------------------

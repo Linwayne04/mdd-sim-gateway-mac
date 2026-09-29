@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template for the one-shot update daemon. Rendered by
+     host/macos/install-launchd.sh (placeholders @...@ replaced with the
+     actual home/repo/build paths) into /Library/LaunchDaemons.
+
+     Design notes:
+     - RunAtLoad false / KeepAlive false: the updater is event-driven, not a
+       service. It polls for a request file on StartInterval.
+     - NO WatchPaths on $MDD_DATA/orchestrator: mdd_update.py atomically
+       rewrites update-status.json (tmp + rename) in that directory at every
+       step, and each rewrite would immediately re-trigger a WatchPaths job —
+       an infinite self-retrigger loop. StartInterval is the safe trigger.
+     - StartInterval 300 is a deliberate tradeoff: worst-case request pickup
+       latency is 5 minutes, but each idle invocation is a cheap no-request
+       early exit (one file read, milliseconds of root time). -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.mdd.update</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@BUILD@/venv/bin/python</string>
+        <string>-u</string>
+        <string>@REPO@/host/macos/mdd_update.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MDD_BUILD</key>
+        <string>@BUILD@</string>
+        <key>MDD_DATA</key>
+        <string>@BUILD@/data</string>
+        <key>MDD_REPO</key>
+        <string>@REPO@</string>
+        <key>MDD_UPDATE_REPO</key>
+        <string>Linwayne04/mdd-sim-gateway-mac</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>@BUILD@/logs/update.log</string>
+    <key>StandardErrorPath</key>
+    <string>@BUILD@/logs/update.log</string>
+</dict>
+</plist>

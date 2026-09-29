@@ -42,9 +42,13 @@ fetch_repo() {
 
 FAILED=0
 
-fetch_repo https://github.com/MddIdd/pjproject-sysmocom-mirror.git pjproject 20537ab1e6beb2baf9ec15599e0217a601cf7ce5 &
+PJPROJECT_REV=20537ab1e6beb2baf9ec15599e0217a601cf7ce5
+ASTERISK_REV=d231cb2c658545773fcd5ebde787219b9ef6566
+ASTERISK_PICK=f1b60dcd9568c4045512fd0d8b619b9fb91a7f35
+
+fetch_repo https://github.com/MddIdd/pjproject-sysmocom-mirror.git pjproject "$PJPROJECT_REV" &
 P1=$!
-fetch_repo https://github.com/MddIdd/asterisk-sysmocom-mirror.git asterisk d231cb2c658545773fcd5ebde787219b9ef6566 &
+fetch_repo https://github.com/MddIdd/asterisk-sysmocom-mirror.git asterisk "$ASTERISK_REV" &
 P2=$!
 wait $P1 || FAILED=1
 wait $P2 || FAILED=1
@@ -53,10 +57,27 @@ wait $P2 || FAILED=1
 # don't fool the idempotency guard — a cherry-pick gets a NEW commit hash)
 if [ -d asterisk/.git ] && ! git -C asterisk rev-parse -q --verify refs/tags/mdd-f1b60dc-pick > /dev/null; then
   (cd asterisk && git config user.email "build@vowifi" && git config user.name "vowifi build" \
-    && git -c http.version=HTTP/1.1 fetch --depth=2 -q origin f1b60dcd9568c4045512fd0d8b619b9fb91a7f35 \
-    && git cherry-pick -X theirs f1b60dcd9568c4045512fd0d8b619b9fb91a7f35 \
+    && git -c http.version=HTTP/1.1 fetch --depth=2 -q origin "$ASTERISK_PICK" \
+    && git cherry-pick -X theirs "$ASTERISK_PICK" \
     && git tag mdd-f1b60dc-pick \
     && echo "CHERRY-PICK OK") || { echo "CHERRY-PICK FAILED" >&2; FAILED=1; }
+fi
+
+# Record the pinned revisions so build-asterisk.sh can compare its .built-rev
+# stamp against them (append/update without disturbing other entries).
+if [ "$FAILED" -eq 0 ]; then
+  pinned_file="$BUILD_ROOT/src/.pinned-revs"
+  touch "$pinned_file"
+  for pair in "PJPROJECT_REV=$PJPROJECT_REV" "ASTERISK_REV=$ASTERISK_REV" \
+              "ASTERISK_PICK=$ASTERISK_PICK"; do
+    name="${pair%%=*}"
+    grep -q "^$name=" "$pinned_file" 2>/dev/null \
+      || echo "$pair" >> "$pinned_file"
+  done
+  # refresh values if the pins changed
+  sed -i '' -e "s|^PJPROJECT_REV=.*|PJPROJECT_REV=$PJPROJECT_REV|" \
+            -e "s|^ASTERISK_REV=.*|ASTERISK_REV=$ASTERISK_REV|" \
+            -e "s|^ASTERISK_PICK=.*|ASTERISK_PICK=$ASTERISK_PICK|" "$pinned_file"
 fi
 
 fetch_tarball() {

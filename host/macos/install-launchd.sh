@@ -131,9 +131,46 @@ install_agent() {
   echo "control agent installed; WebUI: https://127.0.0.1:8443"
 }
 
+# --- update job (macOS port) ---
+install_update() {
+  # Root LaunchDaemon local.mdd.update — polls $MDD_DATA/orchestrator for an
+  # update request (written by the WebUI or `install-macos.sh update`) every
+  # 5 minutes; runs mdd_update.py as root (backup/checkout/rebuild/kickstart).
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "update daemon install needs root — re-invoking via sudo"
+    if [ "$AUTOSTART" -eq 1 ]; then
+      exec sudo MDD_BUILD="$BUILD_ROOT" "$HERE/install-launchd.sh" --update
+    else
+      exec sudo MDD_BUILD="$BUILD_ROOT" "$HERE/install-launchd.sh" --no-autostart --update
+    fi
+  fi
+  local dst=/Library/LaunchDaemons/local.mdd.update.plist
+  mkdir -p "$BUILD_ROOT/data/logs" "$BUILD_ROOT/logs" "$BUILD_ROOT/data/orchestrator"
+  render "$HERE/local.mdd.update.plist" "$dst"
+  chown root:wheel "$dst"
+  chmod 644 "$dst"
+  launchctl bootout system/local.mdd.update 2>/dev/null || true
+  if [ "$AUTOSTART" -eq 1 ]; then
+    # Enable BEFORE bootstrap: a disabled service refuses bootstrap.
+    launchctl enable system/local.mdd.update
+    bootstrap_retry system "$dst"
+  else
+    launchctl disable system/local.mdd.update
+    echo "update daemon installed but DISABLED at boot (--no-autostart)"
+    echo "to activate it later:"
+    echo "  sudo launchctl enable system/local.mdd.update"
+    echo "  sudo launchctl bootstrap system $dst"
+    return 0
+  fi
+  sleep 1
+  launchctl print system/local.mdd.update | grep -E 'state|pid' || true
+  echo "update daemon installed; polls for requests every 5 minutes"
+}
+
 case "${1:-all}" in
   --daemon) install_daemon ;;
   --agent)  install_agent ;;
-  all)      install_daemon; install_agent ;;
-  *) echo "usage: $0 [--no-autostart] [--daemon|--agent]" >&2; exit 2 ;;
+  --update) install_update ;;
+  all)      install_daemon; install_agent; install_update ;;
+  *) echo "usage: $0 [--no-autostart] [--daemon|--agent|--update]" >&2; exit 2 ;;
 esac
