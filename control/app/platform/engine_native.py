@@ -65,11 +65,19 @@ def _request(payload: dict, timeout: float = 30) -> dict:
 
 # --- engine.py-shaped API ------------------------------------------------------
 
-def start(inst: dict, settings: dict, reason: str = "rebuild") -> str:
+def start(inst: dict, settings: dict, reason: str = "rebuild",
+          env: dict | None = None) -> str:
     """Write instance.json, then ask the daemon to spawn the line's supervisor.
+
+    ``env`` carries extra per-line environment into the supervisor's process
+    tree (e.g. SWU_EGRESS_PROXY for SOCKS egress); string keys/values only.
 
     Returns a generation marker shaped like a container id; stop() accepts it the
     same way expected_container_id was used (best-effort, single line)."""
+    extra_env = {}
+    for key, value in (env or {}).items():
+        if isinstance(key, str) and isinstance(value, str) and key:
+            extra_env[key] = value
     iid = str(inst["id"])
     base = os.path.join(cfg.DATA_DIR, "instances", iid)
     run_dir = os.path.join(base, "run")
@@ -100,7 +108,7 @@ def start(inst: dict, settings: dict, reason: str = "rebuild") -> str:
             os.unlink(os.path.join(run_dir, name))
         except FileNotFoundError:
             pass
-    resp = _request({"action": "start", "iid": iid})
+    resp = _request({"action": "start", "iid": iid, "env": extra_env})
     if not resp.get("ok"):
         raise DaemonUnavailable(f"engine daemon refused start: {resp.get('error')}")
     return f"native-{iid}-{int(time.time())}"

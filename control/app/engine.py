@@ -386,7 +386,17 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
     """(Re)create and start the engine container for an instance."""
     if engine_native.native_mode():
         # macOS port: process-based engine via the root daemon, same file contract.
-        return engine_native.start(inst, settings, reason=reason)
+        # Egress parity with the container branch below: select the line's exit
+        # BEFORE the engine spawns; a configured-but-unready exit raises
+        # EgressError and we fail closed exactly like the Docker path. The native
+        # engine runs on the host, so no ePDG pre-resolution is needed (swu_ike
+        # resolves the hostname locally); only the SOCKS environment has to cross
+        # the daemon boundary into the supervisor's process tree.
+        selected_exit = egress.ensure_line(inst, settings) or {}
+        env = {}
+        if selected_exit.get("transport") == "socks5":
+            env["SWU_EGRESS_PROXY"] = selected_exit["proxy_url"]
+        return engine_native.start(inst, settings, reason=reason, env=env)
     if ENGINE_NETWORK in {"host", "none"}:
         raise ValueError("MDD_ENGINE_NETWORK must be a Docker bridge network")
     if DIRECT_NETWORK in {"host", "none"} or (DIRECT_NETWORK and DIRECT_NETWORK == ENGINE_NETWORK):
