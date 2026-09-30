@@ -6878,6 +6878,12 @@ def detect_sms_result(iid: str, since=None) -> dict:
         if not m:
             continue
         if re.search(r"CSeq:\s*\d+\s+MESSAGE", b):   # a response to our MESSAGE
+            # The logger source tail rides on the split block ("... from
+            # WS:127.0.0.1:8088 --->"): skip softphone-relay answers. The browser
+            # JsSIP UA answers the WS notification MESSAGE with 405, which is not a
+            # carrier verdict and must not overwrite the real outcome.
+            if re.search(r"from (WS|WSS):127\.0\.0\.1", b.splitlines()[0]):
+                continue
             code = int(m.group(1))
             result = {"ok": 200 <= code < 300, "code": code, "reason": m.group(2).strip()}
     return result
