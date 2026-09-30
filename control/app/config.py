@@ -31,11 +31,10 @@ _SafeLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 # on a Raspberry Pi with the device page open that was ~70 % of Control's CPU.
 _loaded: tuple | None = None
 
-# Product safety boundary. Upstream caps at 10 so operators must not be able to turn the
-# gateway into a bulk-SIM service by changing deployment configuration. Local port raised
-# to 20 for a multi-eSIM testing setup; per-line ports auto-allocate with live-conflict
-# stepping, so values above the upstream default are safe on this deployment.
-MAX_SIM_LINES = 20
+# Product safety boundary. This is intentionally a source-level limit rather than an environment
+# variable: operators must not be able to turn the gateway into a bulk-SIM service by changing
+# deployment configuration.
+MAX_SIM_LINES = 10
 
 # Values added by the instances API for display only. They may ride back on a complete WebUI
 # form, but they are not part of the desired line configuration and must never reach config.yaml.

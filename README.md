@@ -13,8 +13,6 @@
   <a href="https://github.com/MddIdd/mdd-sim-gateway/discussions">社区讨论</a>
 </p>
 
-> 🍎 **這是 macOS 原生移植版（fork）**：本倉庫是 [MddIdd/mdd-sim-gateway](https://github.com/MddIdd/mdd-sim-gateway) 的 macOS 原生移植分支（`macos-port`）——以 LaunchDaemon 引擎、utun 隧道與原生編譯的 Asterisk 取代 Docker 容器。移植計畫與進度見 [docs/macos-port/PLAN.md](docs/macos-port/PLAN.md)；上游的 Docker/Linux 用法維持不變。
-
 ## macOS 安装（原生移植）
 
 适用于 macOS 13+，**Intel 与 Apple Silicon 均支持**——所有组件都在本机源码编译（无预编译二进制文件），Homebrew 与 MacPorts 路径自动识别。需要 USB PC/SC 读卡器，以及已开通 Wi-Fi Calling 的 SIM。前置条件：Xcode 命令行工具（`xcode-select --install`）、Homebrew 或 MacPorts、git。
@@ -22,7 +20,7 @@
 ### 方法一：一行命令（推荐）
 
 ```bash
-git clone https://github.com/Linwayne04/mdd-sim-gateway-mac.git && cd mdd-sim-gateway-mac && ./install-macos.sh install
+git clone https://github.com/MddIdd/mdd-sim-gateway.git && cd mdd-sim-gateway && ./install-macos.sh install
 ```
 
 `install-macos.sh` 自动完成：依赖检查与安装 → 拉取固定版本源码（pjproject / Asterisk / AMR 编解码库，全部带版本与 SHA-256 锁定）→ 原生编译 Asterisk（自动套用 macOS 修补）→ Python venv → WebUI 构建 → 安装 launchd 服务。除引擎守护进程（LaunchDaemon）外的所有环节都以普通用户运行，只有该步会请求 sudo。整体幂等，`git pull` 后重跑即可增量补齐。
@@ -38,7 +36,7 @@ git clone https://github.com/Linwayne04/mdd-sim-gateway-mac.git && cd mdd-sim-ga
 不想开机自启的话，安装时加 `--no-autostart`（服务会装好但停用，之后随时可用 `launchctl enable` 开回）：
 
 ```bash
-git clone https://github.com/Linwayne04/mdd-sim-gateway-mac.git && cd mdd-sim-gateway-mac && ./install-macos.sh install --no-autostart
+git clone https://github.com/MddIdd/mdd-sim-gateway.git && cd mdd-sim-gateway && ./install-macos.sh install --no-autostart
 ```
 
 ### 方法二：手动安装（逐步/开发者）
