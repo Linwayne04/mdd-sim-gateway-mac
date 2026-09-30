@@ -178,9 +178,21 @@ pcap filter 白名單。之後上游會從零 build 並測 IMS 註冊/SMS/WebRTC
 - ✅ `do_pcap` BPF filter 白名單：只接受固定 BPF 關鍵字 + 數字/位址字面量，
   其餘拒絕（單元測試 15 cases 全過）。
 
-**待使用者決定**：(1) 是否重開上游 PR（拿掉 MAX_SIM_LINES=20/README 宣告、
-rebase 到 develop 或維持 main）；(2) 5 個平台無關修正是否現在不動
-（409/coroutine/notify 三個已在分支裡，拆 PR 時再處理）。
+**PR 狀態（2026-09-30 全部完成）**：
+- ✅ 上游 PR 重開為 #220（base main，branch `macos-port-main`@be6a930）：
+  已拿掉 `MAX_SIM_LINES=20`（恢復上游 10 的產品邊界，20 僅留 fork）與
+  README fork 宣告，clone URL 改指 MddIdd/mdd-sim-gateway。原 #215 已關閉
+  並留言指向 #220。
+- ✅ 5 個平台無關修正已各自基於 develop 開獨立 PR（一題一 PR，附復現
+  步驟與測試）：#221 SMS 405 誤判、#222 ePDG loopback 佔位、
+  #223 eSIM 409 結構化 `{code, instance_id}` + WebUI 停線重試、
+  #224 `_esim_run` coroutine close、#225 notify urllib 回退。
+  #220 已留言列出這 5 個編號。
+- ✅ macOS body 外人可復現：見上方四項 ✅（02 patch、build-asterisk.sh
+  完整流程、daemon 去 hardcode、pcap 白名單），全部已驗證並推至 fork。
+
+**後續**：待上游合併 5 個 split PR 後，rebase `macos-port-main` 丟掉
+重複 hunk，再請上游從零 build 驗證 IMS 註冊/SMS/WebRTC/rekey。
 
 ## 5. 程式組織原則
 
