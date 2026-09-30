@@ -23,11 +23,39 @@ import socket
 import subprocess
 import sys
 import time
-MDD_DATA = os.environ.get("MDD_DATA", os.path.expanduser("~/mdd-macos-build/data"))
-MDD_REPO = os.environ.get("MDD_REPO", "/Users/linwayne/mdd-sim-gateway")
-MDD_VENV = os.environ.get("MDD_VENV", "/Users/linwayne/mdd-macos-build/venv")
-MDD_AST_STAGE = os.environ.get("MDD_AST_STAGE", "/Users/linwayne/mdd-macos-build/asterisk-stage")
-SOCK_USER = os.environ.get("MDD_SOCKET_USER", "linwayne")
+# All values are normally supplied by the launchd plist (see
+# local.mdd.engine.plist, rendered by install-launchd.sh). The fallbacks below
+# only exist so the daemon can also be run by hand; none of them embed a
+# developer machine path:
+#   MDD_REPO      — repo root, derived from this file's location
+#   MDD_VENV      — the venv running this daemon (sys.prefix)
+#   MDD_AST_STAGE — <build root>/asterisk-stage, with the build root taken
+#                   from MDD_DATA's parent
+#   MDD_SOCKET_USER — owner of the build root (same rule as install-launchd.sh;
+#                   the control plane connects as that user)
+def _default_repo():
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _default_build_root():
+    return os.path.dirname(os.path.normpath(MDD_DATA))
+
+
+def _default_socket_user():
+    try:
+        st = os.stat(_default_build_root())
+        return pwd.getpwuid(st.st_uid).pw_name
+    except (OSError, KeyError):
+        return os.environ.get("SUDO_USER", "")
+
+
+MDD_DATA = os.environ.get("MDD_DATA", os.path.join(os.path.expanduser("~"), "mdd-macos-build", "data"))
+MDD_REPO = os.environ.get("MDD_REPO", _default_repo())
+MDD_VENV = os.environ.get("MDD_VENV", sys.prefix)
+MDD_AST_STAGE = os.environ.get("MDD_AST_STAGE", os.path.join(_default_build_root(), "asterisk-stage"))
+SOCK_USER = os.environ.get("MDD_SOCKET_USER", _default_socket_user())
+if not SOCK_USER:
+    raise SystemExit("MDD_SOCKET_USER unset and build-root owner undeterminable")
 
 RUNROOT = os.path.join(MDD_DATA, "run")
 SOCK_PATH = os.path.join(RUNROOT, "engine.sock")
@@ -275,9 +303,17 @@ def do_pcap(seconds, port_filter):
     here and not in the control plane). Returns tcpdump's decoded lines.
     tcpdump runs until the time budget expires (IKE retries are slow — a packet
     count target may never be reached) and whatever was captured up to the kill
-    is returned, never discarded."""
+    is returned, never discarded.
+
+    The BPF filter comes from the (unprivileged) control plane but tcpdump runs
+    as root, so the filter is NOT passed through raw: only a fixed vocabulary of
+    BPF keywords and numeric/address literals are accepted."""
     seconds = max(1, min(60, int(seconds or 20)))
-    bpf = str(port_filter) if port_filter else "udp port 500 or udp port 4500"
+    bpf = "udp port 500 or udp port 4500"
+    if port_filter:
+        bpf = _sanitize_bpf(str(port_filter))
+        if bpf is None:
+            return {"ok": False, "error": "filter not in the allowed pcap vocabulary"}
     cmd = ["tcpdump", "-i", "any", "-n", "-s0", "-l", bpf]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
@@ -290,6 +326,34 @@ def do_pcap(seconds, port_filter):
         return {"ok": False, "output": repr(e)}
     return {"ok": proc.returncode == 0 or bool(out),
             "output": out.decode(errors="replace")}
+
+
+_BPF_WORDS = {
+    "udp", "tcp", "sctp", "icmp", "icmp6", "ip", "ip6", "arp", "port", "portrange",
+    "host", "net", "src", "dst", "and", "or", "not", "greater", "less",
+}
+
+
+def _sanitize_bpf(expr):
+    """Allow only a fixed BPF keyword vocabulary + numeric/address literals,
+    joined by whitespace and parentheses. Returns the sanitized expression or
+    None if anything else is present."""
+    import re
+    tokens = re.findall(r"[()]|[A-Za-z0-9:.%\-]+", expr)
+    if not tokens or "".join(tokens) != re.sub(r"\s+", "", expr):
+        return None
+    for tok in tokens:
+        if tok in ("(", ")"):
+            continue
+        low = tok.lower()
+        if low in _BPF_WORDS:
+            continue
+        if re.fullmatch(r"[0-9]+(:[0-9]+)?(-[0-9]+)?(\.[0-9]+)*", tok):
+            continue
+        if re.fullmatch(r"[0-9a-fA-F]*:[0-9a-fA-F:.]*(%[0-9a-zA-Z]+)?", tok):
+            continue  # IPv6 literal (incl. fe80::1%en0 scoped form)
+        return None
+    return " ".join(t for t in tokens if t not in ("(", ")"))
 
 
 def handle(req):

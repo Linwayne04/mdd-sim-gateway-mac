@@ -1,0 +1,329 @@
+From: mdd-sim-gateway macOS port
+Subject: [PATCH] Darwin userspace SIP IPsec dataplane + build fixes
+
+Carries the macOS-specific remainder of the port on top of the 9 mdd
+python patches (engine/patches/asterisk/*.py, applied first — see
+engine/Dockerfile) and 01_sockaddr_sin_len.patch:
+
+- res/res_pjsip_outbound_registration/volte.c: export the sipsec.json
+  runtime config (userspace SIP IPsec dataplane parameters) consumed by
+  swu_ike.py; fetch it via the module load callback instead of Linux
+  netlink-only paths.
+- res/res_pjsip_outbound_registration/netlink_xfrm.c: wrap the libmnl /
+  <linux/xfrm.h> kernel-XFRM implementation in #ifdef __linux__; on
+  non-Linux compile the stubs (volte_set_xfrm() failure is only logged
+  by the caller — the gateway dataplane is userspace on macOS).
+- res/res_pjsip_outbound_registration/netlink_xfrm.h: on __APPLE__
+  provide struct xfrm_algo with a fixed 160-byte key buffer (avoids the
+  flexible-array-member embedding problem).
+- res/res_pjsip_outbound_registration.c: drop <depend>libmnl</depend>
+  from MODULEINFO (module builds on macOS without libmnl).
+- configure.ac: stop forcing AST_POLL_COMPAT on darwin — the select-
+  based 10.4-era poll() workaround conflicts with the native <poll.h>.
+  Requires a bootstrap.sh re-run before ./configure (build-asterisk.sh
+  does this; engine/Dockerfile already runs bootstrap unconditionally).
+- main/strcompat.c: include <poll.h> on __APPLE__.
+- codecs/codec_vevs.c: SOCK_CLOEXEC is Linux-only; shim to 0 on macOS.
+
+---
+diff --git a/codecs/codec_vevs.c b/codecs/codec_vevs.c
+index 36aaf3c..251b25c 100644
+--- a/codecs/codec_vevs.c
++++ b/codecs/codec_vevs.c
+@@ -27,6 +27,11 @@
+ #include "asterisk/linkedlists.h"
+
+ #include <asterisk/vevs.h>
++/* macOS has no SOCK_CLOEXEC (Linux-only); fall back to plain socket(). */
++#ifndef SOCK_CLOEXEC
++#define SOCK_CLOEXEC 0
++#endif
++
+ /* Sample frame data */
+ #include "asterisk/slin.h"
+ #include "ex_vevs.h"
+diff --git a/configure.ac b/configure.ac
+index 00d6990..441d54a 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -94,7 +94,9 @@ case "${host_os}" in
+         astlogdir=/Library/Logs/Asterisk
+         astvarrundir='/Library/Application Support/Asterisk/Run'
+      fi
+-     AC_DEFINE([AST_POLL_COMPAT], 1, [Define to 1 if internal poll should be used.])
++     dnl Modern macOS (>= 12) has a native, correct poll(); the select-based
++     dnl AST_POLL_COMPAT workaround targets 10.4-era bugs and conflicts with
++     dnl <poll.h>. Do not force it on darwin.
+      AC_DEFINE([_DARWIN_UNLIMITED_SELECT], 1, [Define to 1 if running on Darwin.])
+      ;;
+      solaris*)+/* macOS: poll() lives in <poll.h>, not pulled in implicitly like on Linux */
++#ifdef __APPLE__
++#include <poll.h>
++#endif
++
+ #include <ctype.h>
+ #include <sys/time.h>       /* for getrlimit(2) */
+ #include <sys/resource.h>   /* for getrlimit(2) */
+diff --git a/res/res_pjsip_outbound_registration/netlink_xfrm.c b/res/res_pjsip_outbound_registration/netlink_xfrm.c
+--- a/res/res_pjsip_outbound_registration/netlink_xfrm.c
++++ b/res/res_pjsip_outbound_registration/netlink_xfrm.c
+@@ -21,14 +21,72 @@
+ #include <stdio.h>
+ #include <netinet/in.h>
+ 
++#ifdef __linux__
+ #include <libmnl/libmnl.h>
+ #include <linux/xfrm.h>
++#endif
+ #include <arpa/inet.h>
+ 
+ #include "netlink_xfrm.h"
+ 
+ #define XFRM_USER_ID	0x240299 /* some random number; let's use TS 24.299 */
+ 
++#ifndef __linux__
++/* macOS: kernel IPsec via Linux netlink XFRM is unavailable. The
++ * mdd-sim-gateway dataplane uses userspace ESP (swu_ike on a utun
++ * device) instead, so these stubs simply report the operation as
++ * unsupported; volte.c treats failure as non-fatal. */
++
++struct mnl_socket *xfrm_init_mnl_socket(void)
++{
++	fprintf(stderr, "ERR: kernel XFRM not supported on macOS; "
++		"userspace ESP (utun) dataplane must be used\n");
++	return NULL;
++}
++
++void xfrm_exit_mnl_socket(struct mnl_socket *mnl_socket)
++{
++	(void)mnl_socket;
++}
++
++int xfrm_spi_alloc(struct mnl_socket *mnl_sock, uint32_t reqid, uint32_t *spi_out,
++		   const struct sockaddr *src, const struct sockaddr *dst)
++{
++	(void)mnl_sock; (void)reqid; (void)spi_out; (void)src; (void)dst;
++	return -EOPNOTSUPP;
++}
++
++int xfrm_sa_del(struct mnl_socket *mnl_sock,
++		const struct sockaddr *src, const struct sockaddr *dst, uint32_t spi)
++{
++	(void)mnl_sock; (void)src; (void)dst; (void)spi;
++	return -EOPNOTSUPP;
++}
++
++int xfrm_sa_add(struct mnl_socket *mnl_sock, uint32_t reqid,
++		const struct sockaddr *src, const struct sockaddr *dst, uint32_t spi,
++		const struct xfrm_algo *auth_algo, const struct xfrm_algo *ciph_algo)
++{
++	(void)mnl_sock; (void)reqid; (void)src; (void)dst; (void)spi;
++	(void)auth_algo; (void)ciph_algo;
++	return -EOPNOTSUPP;
++}
++
++int xfrm_policy_add(struct mnl_socket *mnl_sock,
++		    const struct sockaddr *src, const struct sockaddr *dst, uint32_t spi, bool dir_in)
++{
++	(void)mnl_sock; (void)src; (void)dst; (void)spi; (void)dir_in;
++	return -EOPNOTSUPP;
++}
++
++int xfrm_policy_del(struct mnl_socket *mnl_sock,
++		    const struct sockaddr *src, const struct sockaddr *dst, bool dir_in)
++{
++	(void)mnl_sock; (void)src; (void)dst; (void)dir_in;
++	return -EOPNOTSUPP;
++}
++#else /* __linux__ */
++
+ struct mnl_socket *xfrm_init_mnl_socket(void)
+ {
+ 	struct mnl_socket *mnl_socket = mnl_socket_open(NETLINK_XFRM);
+@@ -433,3 +491,5 @@ int xfrm_policy_del(struct mnl_socket *mnl_sock,
+ 
+ 	return 0;
+ }
++
++#endif /* __linux__ */
+diff --git a/res/res_pjsip_outbound_registration/netlink_xfrm.h b/res/res_pjsip_outbound_registration/netlink_xfrm.h
+--- a/res/res_pjsip_outbound_registration/netlink_xfrm.h
++++ b/res/res_pjsip_outbound_registration/netlink_xfrm.h
+@@ -3,7 +3,20 @@
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include <sys/socket.h>
++
++#ifdef __linux__
+ #include <linux/xfrm.h>
++#else
++/* macOS (and other non-Linux) builds: no kernel XFRM API. Provide a
++ * stand-in for struct xfrm_algo (name/key_len/key fields used by volte.c)
++ * without linux/xfrm.h. Fixed-size key buffer: a flexible array member
++ * cannot portably be embedded in struct xfrm_algobuf below. */
++struct xfrm_algo {
++	char alg_name[64];
++	unsigned int alg_key_len;
++	char alg_key[160];
++};
++#endif
+ 
+ struct mnl_socket;
+ 
+diff --git a/res/res_pjsip_outbound_registration/volte.c b/res/res_pjsip_outbound_registration/volte.c
+--- a/res/res_pjsip_outbound_registration/volte.c
++++ b/res/res_pjsip_outbound_registration/volte.c
+@@ -24,6 +24,67 @@
+ #include "volte.h"
+ #include "milenage.h"
+ 
++#ifdef __APPLE__
++/* mdd-sim-gateway macOS port: kernel XFRM (and PF_KEY flow control) is
++ * unavailable on macOS, so the SIP IPsec legs (3GPP TS 33.203) are terminated
++ * in userspace by swu_ike's ESP dataplane. volte.c exports the negotiated SA
++ * parameters to $MDD_RUNDIR/sipsec.json (root-only: it carries IK/CK) and
++ * swu_ike applies ESP transport mode on the tunnel path. */
++#include <errno.h>
++#include <limits.h>
++
++static unsigned long sipsec_export_version;
++
++static void sipsec_export_state(const char *local_ip, uint16_t local_port_c, uint16_t local_port_s,
++				uint32_t local_spi_c, uint32_t local_spi_s,
++				const char *remote_ip, uint16_t remote_port_c, uint16_t remote_port_s,
++				uint32_t remote_spi_c, uint32_t remote_spi_s,
++				const char *alg, const char *ealg,
++				const uint8_t *ik, const uint8_t *ck, int active)
++{
++	char path[PATH_MAX], tmp[PATH_MAX];
++	const char *rundir = getenv("MDD_RUNDIR");
++	FILE *f;
++	int i;
++
++	if (!rundir || !*rundir)
++		rundir = "/run/mdd-sim-gateway";
++	snprintf(path, sizeof(path), "%s/sipsec.json", rundir);
++	snprintf(tmp, sizeof(tmp), "%s/.sipsec.json.tmp", rundir);
++
++	f = fopen(tmp, "w");
++	if (!f) {
++		ast_log(LOG_WARNING, "sipsec export: cannot write %s: %s\n", tmp, strerror(errno));
++		return;
++	}
++	fprintf(f, "{\n \"version\": %lu,\n \"active\": %s,\n", ++sipsec_export_version,
++		active ? "true" : "false");
++	if (active) {
++		fprintf(f,
++			" \"local_ip\": \"%s\",\n \"local_port_c\": %u,\n \"local_port_s\": %u,\n"
++			" \"local_spi_c\": %u,\n \"local_spi_s\": %u,\n"
++			" \"remote_ip\": \"%s\",\n \"remote_port_c\": %u,\n \"remote_port_s\": %u,\n"
++			" \"remote_spi_c\": %u,\n \"remote_spi_s\": %u,\n"
++			" \"alg\": \"%s\",\n \"ealg\": \"%s\",\n \"ik\": \"",
++			local_ip, local_port_c, local_port_s, local_spi_c, local_spi_s,
++			remote_ip, remote_port_c, remote_port_s, remote_spi_c, remote_spi_s,
++			alg, ealg);
++		for (i = 0; i < 16; i++)
++			fprintf(f, "%02x", ik[i]);
++		fprintf(f, "\",\n \"ck\": \"");
++		for (i = 0; i < 16; i++)
++			fprintf(f, "%02x", ck[i]);
++		fprintf(f, "\"\n");
++	}
++	fprintf(f, "}\n");
++	fclose(f);
++	chmod(tmp, 0600);
++	if (rename(tmp, path) != 0)
++		ast_log(LOG_WARNING, "sipsec export: rename %s -> %s failed: %s\n",
++			tmp, path, strerror(errno));
++}
++#endif /* __APPLE__ */
++
+ #define fmt_str(str) (int)(str).slen, (str).ptr
+ #define fmt_strp(strp) (int)(strp)->slen, (strp)->ptr
+ 
+@@ -112,6 +173,13 @@ static char *sockaddr_storage_to_string(const struct sockaddr_storage *addr, cha
+ /* Delete old SA and SP entries upon new registration or module exit. */
+ void volte_cleanup_xfrm(struct ast_sip_transport_state *transport_state)
+ {
++#ifdef __APPLE__
++	/* macOS port: the SAs live in swu_ike's userspace ESP, not the kernel —
++	 * retire the exported flow record so the dataplane stops unwrapping. */
++	if (sipsec_export_version > 0)
++		sipsec_export_state(NULL, 0, 0, 0, 0, NULL, 0, 0, 0, 0, "", "", NULL, NULL, 0);
++	return;
++#else
+ 	struct sockaddr_storage local_addr_c, local_addr_s;
+ 	struct sockaddr_storage remote_addr_c, remote_addr_s;
+ 
+@@ -168,11 +236,25 @@ void volte_cleanup_xfrm(struct ast_sip_transport_state *transport_state)
+ 			    (const struct sockaddr *)&local_addr_c, true);
+ 		transport_state->volte.remote_sp_s_set = PJ_FALSE;
+ 	}
++#endif /* __APPLE__ */
+ 
+ }
+ 
+ pj_status_t volte_alloc_spi(struct ast_sip_transport_state *transport_state)
+ {
++#ifdef __APPLE__
++	/* macOS port: no kernel XFRM to allocate from — draw SPIs locally, inside
++	 * the RFC 4303 range and clear of the reserved 0-255 window. */
++	uint32_t spi_c = 0, spi_s = 0;
++
++	while (spi_c < 256)
++		spi_c = ast_random() & 0x0fffffff;
++	while (spi_s < 256 || spi_s == spi_c)
++		spi_s = ast_random() & 0x0fffffff;
++	transport_state->volte.local_spi_c = spi_c;
++	transport_state->volte.local_spi_s = spi_s;
++	return PJ_SUCCESS;
++#else
+ 	struct sockaddr_storage local_addr_c, local_addr_s;
+ 	struct sockaddr_storage remote_addr_c, remote_addr_s;
+ //	char src_str[64], dst_str[64];
+@@ -215,6 +297,7 @@ spi_alloc_failed:
+ 		  transport_state->volte.local_spi_c);
+ 
+ 	return PJ_SUCCESS;
++#endif /* __APPLE__ */
+ }
+ 
+ /* Set new SA and SP entries upon secuirty handshake. */
+@@ -282,6 +365,27 @@ static pj_status_t volte_set_xfrm(struct ast_sip_transport_state *transport_stat
+ 	copy_pj_sockaddr_to_sockaddr_storage(&transport_state->volte.local_addr_s, &local_addr_s);
+ 	copy_pj_sockaddr_to_sockaddr_storage(&transport_state->volte.remote_addr_s, &remote_addr_s);
+ 
++#ifdef __APPLE__
++	/* macOS port: instead of programming kernel XFRM, hand the negotiated SA
++	 * parameters to swu_ike's userspace ESP dataplane via the run dir. */
++	{
++		char local_ip[64], remote_ip[64];
++
++		sockaddr_storage_to_string(&local_addr_c, local_ip, sizeof(local_ip));
++		sockaddr_storage_to_string(&remote_addr_c, remote_ip, sizeof(remote_ip));
++		sipsec_export_state(local_ip,
++			pj_sockaddr_get_port(&transport_state->volte.local_addr_c),
++			pj_sockaddr_get_port(&transport_state->volte.local_addr_s),
++			transport_state->volte.local_spi_c, transport_state->volte.local_spi_s,
++			remote_ip,
++			pj_sockaddr_get_port(&transport_state->volte.remote_addr_c),
++			pj_sockaddr_get_port(&transport_state->volte.remote_addr_s),
++			transport_state->volte.remote_spi_c, transport_state->volte.remote_spi_s,
++			g_ipsec_alg[i].sip_name, g_ipsec_ealg[j].sip_name, ik, ck, 1);
++	}
++	return PJ_SUCCESS;
++#endif /* __APPLE__ */
++
+ 	ast_debug(1, "xfrm: local client: %s:%d (SPI=0x%08x) remote server: %s:%d (SPI=0x%08x)\n",
+ 		  sockaddr_storage_to_string(&local_addr_c, src_str, sizeof(src_str)),
+ 		  pj_sockaddr_get_port(&transport_state->volte.local_addr_c), transport_state->volte.local_spi_c,
+--- a/res/res_pjsip_outbound_registration.c
++++ b/res/res_pjsip_outbound_registration.c
+@@ -17,7 +17,6 @@
+  */
+ 
+ /*** MODULEINFO
+-	<depend>libmnl</depend>
+ 	<depend>pjproject</depend>
+ 	<depend>res_pjsip</depend>
+ 	<use type="module">res_statsd</use>

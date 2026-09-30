@@ -8,13 +8,22 @@
 # Idempotent: if a staged asterisk binary already exists, the build is skipped
 # (delete asterisk-stage to force a rebuild). Run fetch-sources.sh first.
 #
-# Applied on top of the pristine sources, after every distclean:
+# Applied on top of the pristine sources, after every distclean (mirrors the
+# engine/Dockerfile asterisk build, in the same order):
+#   0) engine/patches/asterisk/*.py — the 9 upstream python patches (SMS/USSD
+#      dialplan, ...), with the hardcoded /home/asterisk-build/asterisk prefix
+#      rewritten to this tree
 #   1) main/Makefile          — Darwin bundled-pjproject link (-all_load + archive
 #                               -L paths + Foundation/AppKit; upstream leaves
 #                               $(PJPROJECT_LIB) empty -> SIGSEGV at boot)
 #   2) main/xml.c             — libxml2 >= 2.13 ID-attribute re-registration fix
-#   3) patches/asterisk/*.patch from the repo — incl. res_pjproject.c sin_len
-#                               (WebRTC ICE candidate memcmp fix)
+#   3) patches/asterisk/*.patch from the repo — 01 res_pjproject.c sin_len
+#                               (WebRTC ICE candidate memcmp fix), 02 the Darwin
+#                               userspace SIP IPsec dataplane (volte.c sipsec.json
+#                               export + netlink_xfrm stubs + build fixes)
+#   4) sh bootstrap.sh        — regenerate configure after 02's configure.ac
+#                               change (remove AST_POLL_COMPAT); Dockerfile
+#                               runs bootstrap unconditionally too
 # res_geolocation is disabled (GNU-ld blob embedding; unbuildable on macOS) and
 # verified absent from MENUSELECT_BUILD_DEPS.
 set -euo pipefail
@@ -71,33 +80,29 @@ JOBS=$(sysctl -n hw.ncpu)
 
 cd "$SRC"
 
-echo "=== distclean + configure (CC=cc, C17) ==="
 make distclean > /dev/null 2>&1 || true
 ln -sfn "$PJPROJECT" third-party/pjproject/source
-# AST_EXT_LIB_CHECK only adds -L/-I when --with-<lib>=PATH is given (no pkg-config path);
-# AMR libs live in our local stage prefix.
-./configure --enable-binary-modules ac_cv_prog_cc_c23=no \
-	--with-opencore-amrnb="$STAGE" \
-	--with-opencore-amrwb="$STAGE" \
-	--with-vo-amrwbenc="$STAGE" > configure-macos.log 2>&1 || {
-		tail -20 configure-macos.log >&2; echo "CONFIGURE FAILED" >&2; exit 1; }
-echo "configure OK"
 
-echo "=== menuselect ==="
-make menuselect/menuselect menuselect-tree menuselect.makeopts
-./menuselect/menuselect --enable codec_opus --disable BUILD_NATIVE
-# Whitelist modules that menuselect may have auto-disabled; harmless if deps still missing.
-./menuselect/menuselect --enable res_pjsip_outbound_registration --enable codec_amr
-# res_geolocation uses GNU-ld -b binary blob embedding (-Wl,-znoexecstack): unbuildable on macOS,
-# not in the engine whitelist (noloaded on Linux too). res_pjsip_geolocation depends on it and is
-# likewise not whitelisted. Disable AFTER the enables and VERIFY: menuselect's --check-deps (re-run
-# by make) force-enables res_geolocation into MENUSELECT_BUILD_DEPS if anything still depends on it.
-./menuselect/menuselect --disable res_geolocation --disable res_pjsip_geolocation
-if grep -E "^MENUSELECT_BUILD_DEPS=.*res_geolocation" menuselect.makeopts > /dev/null; then
-	echo "FATAL: res_geolocation still in MENUSELECT_BUILD_DEPS"; exit 1
-fi
+# --- mdd-sim-gateway macOS port: source patches (applied after every distclean,
+# before configure, mirroring the engine/Dockerfile asterisk build) ---
+# 0) engine/patches/asterisk/*.py — the 9 upstream python patches (SMS/USSD
+#    dialplan, ...), applied like Dockerfile's `for p in .../*.py` loop. The
+#    scripts hardcode /home/asterisk-build/asterisk as the tree root; sed the
+#    prefix onto a scratch copy (never rewrite the repo files) and run those.
+#    The scripts self-check their own markers, so this step is idempotent.
+PY_PATCH_SRC="$REPO/engine/patches/asterisk"
+[ -d "$PY_PATCH_SRC" ] || { echo "missing $PY_PATCH_SRC" >&2; exit 1; }
+PY_PATCH_TMP="$(mktemp -d "${TMPDIR:-/tmp}/mdd-ast-pypatches.XXXXXX")"
+trap 'rm -rf "$PY_PATCH_TMP"' EXIT
+for pf in "$PY_PATCH_SRC"/*.py; do
+  [ -e "$pf" ] || continue
+  sed "s|/home/asterisk-build/asterisk|$SRC|g" "$pf" > "$PY_PATCH_TMP/$(basename "$pf")"
+done
+for pf in "$PY_PATCH_TMP"/*.py; do
+  echo "applying engine patch $(basename "$pf")"
+  python3 "$pf" || { echo "python patch $pf FAILED" >&2; exit 1; }
+done
 
-# --- mdd-sim-gateway macOS port: source patches (applied after every distclean) ---
 # 1) main/Makefile, Darwin branch of the bundled-pjproject link: upstream links
 #    libasteriskpj.dylib with an EMPTY $(PJPROJECT_LIB), so _pj_init etc. stay
 #    undefined (lazy-bound to NULL -> SIGSEGV at every boot in ast_pj_init).
@@ -227,6 +232,38 @@ for pf in "$PATCH_DIR"/*.patch; do
 		echo "$(basename "$pf") applied"
 	fi
 done
+
+# 4) sh bootstrap.sh — 02_sip_ipsec_darwin.patch edits configure.ac (drops the
+#    10.4-era AST_POLL_COMPAT poll workaround that conflicts with <poll.h>);
+#    regenerate configure + the menuselect configure before running them.
+#    engine/Dockerfile runs bootstrap unconditionally after the py patches too.
+echo "=== bootstrap (regenerate configure) ==="
+sh bootstrap.sh > bootstrap-macos.log 2>&1 || { tail -20 bootstrap-macos.log >&2; echo "BOOTSTRAP FAILED" >&2; exit 1; }
+echo "bootstrap OK"
+
+echo "=== configure (CC=cc, C17) ==="
+# AST_EXT_LIB_CHECK only adds -L/-I when --with-<lib>=PATH is given (no pkg-config path);
+# AMR libs live in our local stage prefix.
+./configure --enable-binary-modules ac_cv_prog_cc_c23=no \
+	--with-opencore-amrnb="$STAGE" \
+	--with-opencore-amrwb="$STAGE" \
+	--with-vo-amrwbenc="$STAGE" > configure-macos.log 2>&1 || {
+		tail -20 configure-macos.log >&2; echo "CONFIGURE FAILED" >&2; exit 1; }
+echo "configure OK"
+
+echo "=== menuselect ==="
+make menuselect/menuselect menuselect-tree menuselect.makeopts
+./menuselect/menuselect --enable codec_opus --disable BUILD_NATIVE
+# Whitelist modules that menuselect may have auto-disabled; harmless if deps still missing.
+./menuselect/menuselect --enable res_pjsip_outbound_registration --enable codec_amr
+# res_geolocation uses GNU-ld -b binary blob embedding (-Wl,-znoexecstack): unbuildable on macOS,
+# not in the engine whitelist (noloaded on Linux too). res_pjsip_geolocation depends on it and is
+# likewise not whitelisted. Disable AFTER the enables and VERIFY: menuselect's --check-deps (re-run
+# by make) force-enables res_geolocation into MENUSELECT_BUILD_DEPS if anything still depends on it.
+./menuselect/menuselect --disable res_geolocation --disable res_pjsip_geolocation
+if grep -E "^MENUSELECT_BUILD_DEPS=.*res_geolocation" menuselect.makeopts > /dev/null; then
+	echo "FATAL: res_geolocation still in MENUSELECT_BUILD_DEPS"; exit 1
+fi
 
 echo "=== make -j$JOBS ==="
 set -o pipefail

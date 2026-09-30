@@ -148,6 +148,40 @@ notify HTTP 回調、AMI 5038、軟電話 WS——只是「容器管理」換成
     空轉 exit 0、line 3 重啟後註冊正常（40b7a17 亦修 softphone listener 測試的
     http_bind_addr 傳參）。
 
+## 6. Upstream PR #215 回應處理（2026-09-30）
+
+上游三點回應（維護者 2026-09-29）：(1) 上游 PR 只留 macOS body，拿掉
+`MAX_SIM_LINES=20` 與 README fork 宣告（保留在 fork）；(2) 5 個平台無關修正
+（detect_sms_result 405、vowifi_support loopback、eSIM 409 結構化、_esim_run
+coroutine close、notify.py urllib fallback——其中 409/coroutine/notify 已在本分支）
+應各自基於 develop 開獨立 PR 附復現步驟；(3) macOS body 必須外人可復現：
+補交 volte.c sipsec.json patch、原生 build 步驟腳本化、去 hardcode 路徑、
+pcap filter 白名單。之後上游會從零 build 並測 IMS 註冊/SMS/WebRTC/rekey，
+再決定是否收為 experimental。
+
+**Fork 側已完成（本節）**：
+- ✅ `patches/asterisk/02_sip_ipsec_darwin.patch`：Darwin SIP IPsec 其餘修改
+  （volte.c sipsec.json 匯出 104 行、netlink_xfrm.c/h stub 73 行、
+  outbound_registration.c 去 libmnl depend、configure.ac 去 AST_POLL_COMPAT、
+  strcompat.c poll.h、codec_vevs.c SOCK_CLOEXEC shim），已在隔離樹上驗證
+  01+02 乾跑套用成功（與 py patch 套用順序無關）。
+- ✅ `build-asterisk.sh` 重排為 Dockerfile 順序：distclean → py patches
+  （sed 改寫 `/home/asterisk-build/asterisk` 前綴到暫存副本）→ main/Makefile、
+  main/xml.c → `patches/asterisk/*.patch` → `sh bootstrap.sh`（configure.ac
+  修改後重產 configure）→ configure → menuselect → make。乾淨樹
+  全流程（patch→bootstrap→configure）已驗證，AST_POLL_COMPAT 不再定義。
+  先前 clean build 會缺全部 9 個 SMS/USSD patch 且 configure.ac 修改無效——
+  兩個可復現性破口都補上。
+- ✅ `mdd_engine_daemon.py` 去除 linwayne hardcode：MDD_REPO 由 `__file__`
+  推導、MDD_VENV 用 sys.prefix、MDD_AST_STAGE 由 MDD_DATA 上層推導、
+  SOCK_USER 預設取 build-root owner（同 install-launchd.sh 規則）。
+- ✅ `do_pcap` BPF filter 白名單：只接受固定 BPF 關鍵字 + 數字/位址字面量，
+  其餘拒絕（單元測試 15 cases 全過）。
+
+**待使用者決定**：(1) 是否重開上游 PR（拿掉 MAX_SIM_LINES=20/README 宣告、
+rebase 到 develop 或維持 main）；(2) 5 個平台無關修正是否現在不動
+（409/coroutine/notify 三個已在分支裡，拆 PR 時再處理）。
+
 ## 5. 程式組織原則
 
 - 平台分支集中在邊界:新增 `control/app/platform/`(darwin/linux 適配)與
