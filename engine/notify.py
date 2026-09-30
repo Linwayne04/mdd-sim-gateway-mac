@@ -49,18 +49,41 @@ def main():
         pass
     if not manager_url:
         return
+    url = f"{manager_url.rstrip('/')}/api/engine/event"
+    token = os.environ.get("MANAGER_EVENT_TOKEN") or env.get("MANAGER_EVENT_TOKEN", "")
     try:
         import requests
         import urllib3
         urllib3.disable_warnings()
-        token = os.environ.get("MANAGER_EVENT_TOKEN") or env.get("MANAGER_EVENT_TOKEN", "")
-        r = requests.post(f"{manager_url.rstrip('/')}/api/engine/event",
-                          json=payload, headers={"X-MDD-Engine-Token": token}, timeout=3, verify=False)
-        if r.status_code >= 300:
-            _warn(f"{event} -> {manager_url}: HTTP {r.status_code}")
+    except ImportError:
+        requests = None
+    if requests is not None:
+        try:
+            r = requests.post(url, json=payload,
+                              headers={"X-MDD-Engine-Token": token}, timeout=3, verify=False)
+            if r.status_code >= 300:
+                _warn(f"{event} -> {manager_url}: HTTP {r.status_code}")
+            return
+        except Exception as e:
+            # Still never fail the caller, but leave a trace in the container log: an unreachable
+            # manager used to drop every inbound SMS without a single line anywhere.
+            _warn(f"{event} -> {manager_url}: {type(e).__name__}")
+            return
+    # Fallback for interpreters without requests (e.g. a host python3 that the
+    # dialplan shebang resolves to outside the container image): stdlib urllib.
+    try:
+        import ssl
+        import urllib.request
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(url, data=data, headers={
+            "Content-Type": "application/json", "X-MDD-Engine-Token": token})
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=3, context=ctx) as r:
+            if r.status >= 300:
+                _warn(f"{event} -> {manager_url}: HTTP {r.status}")
     except Exception as e:
-        # Still never fail the caller, but leave a trace in the container log: an unreachable
-        # manager used to drop every inbound SMS without a single line anywhere.
         _warn(f"{event} -> {manager_url}: {type(e).__name__}")
 
 
