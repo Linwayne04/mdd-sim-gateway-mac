@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Softphone as Phone, microphoneMessage, RELAY_UNAVAILABLE, RELAY_UNREACHABLE } from './softphone.js'
 import { useI18n } from './i18n.jsx'
@@ -6,6 +6,7 @@ import { useContactNames } from './contactNames.js'
 
 const GREEN = '#22c55e'
 const RED = '#ef4444'
+const DTMF_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#']
 
 // Keep incoming-call registration independent of the page the administrator happens to be
 // viewing. The Calls page owns its selected line (it needs the same Phone for outbound calls),
@@ -20,6 +21,8 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
   const [call, setCallState] = useState(null)
   const [muted, setMuted] = useState(false)
   const [duration, setDuration] = useState(0)
+  const [keypad, setKeypad] = useState(false)
+  const [dtmfSeq, setDtmfSeq] = useState('')
 
   const setCall = (next) => {
     callRef.current = typeof next === 'function' ? next(callRef.current) : next
@@ -59,6 +62,8 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
             }
             clearTimeout(clearTimer.current)
             setMuted(false)
+            setKeypad(false)
+            setDtmfSeq('')
             setCall({ id, line: line.name || id, number: data?.from || t('Unknown'), state: 'incoming' })
           } else if (type === 'active') {
             setCall((current) => current?.id === id
@@ -67,6 +72,7 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
             if (callRef.current?.id !== id) return
             setCall((current) => current ? { ...current, state: 'ended', endCause: data?.cause } : current)
             setMuted(false)
+            setKeypad(false)
             clearTimer.current = setTimeout(() => setCall(null), 1800)
           } else if (type === 'mediafallback') {
             // Answered without a microphone: the caller is audible, the user is not. Say so
@@ -107,28 +113,52 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
     return () => clearInterval(timer)
   }, [call?.state, call?.startedAt])
 
+  const sendTone = useCallback((key) => {
+    const active = callRef.current
+    if (active?.state !== 'active') return
+    const phone = phones.current.get(active.id)
+    if (!phone) return
+    phone.sendDTMF(key)
+    setDtmfSeq((current) => (current + key).slice(-32))
+  }, [])
+
+  useEffect(() => {
+    if (!(keypad && call?.state === 'active')) return
+    const onKey = (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (!/^[0-9*#]$/.test(event.key)) return
+      event.preventDefault()
+      sendTone(event.key)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [keypad, call?.state, sendTone])
+
   if (!call) return null
   const phone = phones.current.get(call.id)
   const answer = () => { phone?.unlockAudio(); phone?.answer() }
-  const decline = () => { phone?.reject(); setCall({ ...call, state: 'ended', endCause: 'Rejected' }) }
-  const hangup = () => { phone?.hangup(); setCall({ ...call, state: 'ended' }) }
+  const decline = () => { phone?.reject(); setKeypad(false); setCall({ ...call, state: 'ended', endCause: 'Rejected' }) }
+  const hangup = () => { phone?.hangup(); setKeypad(false); setCall({ ...call, state: 'ended' }) }
   const toggleMute = () => {
     const next = !muted
     setMuted(next)
     phone?.setMuted(next)
   }
+  const toggleKeypad = () => { setDtmfSeq(''); setKeypad((open) => !open) }
   const clock = `${String(Math.floor(duration / 60)).padStart(2, '0')}:${String(duration % 60).padStart(2, '0')}`
 
   return <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(6,10,20,0.86)',
     backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-    <div className="card" role="dialog" aria-modal="true" style={{ padding: 40, width: 390, textAlign: 'center',
+    <div className="card" role="dialog" aria-modal="true" style={{ padding: keypad ? 24 : 40,
+      width: 'min(390px, calc(100vw - 24px))', maxHeight: 'calc(100dvh - 24px)', overflowY: 'auto', textAlign: 'center',
       boxShadow: '0 20px 60px rgba(0,0,0,.65)' }}>
       <div style={{ fontSize: 13, color: 'var(--text-mute)', letterSpacing: 1, textTransform: 'uppercase' }}>
         {t(call.state === 'incoming' ? 'Incoming call' : call.state === 'active' ? 'Connected' : 'Call ended')}
       </div>
-      <div style={{ margin: '24px auto', width: 104, height: 104, borderRadius: '50%', display: 'grid',
+      <div style={{ margin: keypad ? '12px auto' : '24px auto', width: keypad ? 64 : 104,
+        height: keypad ? 64 : 104, borderRadius: '50%', display: 'grid',
         placeItems: 'center', background: `${call.state === 'active' ? GREEN : '#3b82f6'}22`,
-        color: call.state === 'active' ? GREEN : '#60a5fa', fontSize: 38, fontWeight: 800 }}>
+        color: call.state === 'active' ? GREEN : '#60a5fa', fontSize: keypad ? 28 : 38, fontWeight: 800 }}>
         {(call.number || '?').replace(/\D/g, '').slice(-2) || '?'}
       </div>
       <div className={callerName ? '' : 'mono'} style={{ fontSize: 26, fontWeight: 800 }}>{callerName || call.number}</div>
@@ -139,12 +169,26 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
         {t('Listen only · the other side cannot hear you')}
       </div>}
 
+      {call.state === 'active' && keypad && <div style={{ maxWidth: 220, margin: '18px auto 0', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div className="mono" style={{ minHeight: 40, padding: '8px 12px', borderRadius: 8,
+          background: 'var(--surface-2, rgba(255,255,255,0.06))', border: '1px solid var(--border, rgba(255,255,255,0.12))',
+          fontSize: 20, letterSpacing: 2, overflow: 'hidden', whiteSpace: 'nowrap', direction: 'rtl',
+          color: dtmfSeq ? 'var(--text)' : 'var(--text-mute)' }}>
+          {dtmfSeq || t('Type or tap keys')}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+          {DTMF_KEYS.map((key) => <button key={key} type="button" className="btn btn-ghost"
+            style={{ minHeight: 44, fontSize: 18 }} onClick={() => sendTone(key)}>{key}</button>)}
+        </div>
+      </div>}
+
       {call.state === 'incoming' && <div style={{ display: 'flex', justifyContent: 'center', gap: 56, marginTop: 34 }}>
         <ActionButton label={t('Decline')} icon="✕" color={RED} onClick={decline} />
         <ActionButton label={t('Answer')} icon="✆" color={GREEN} onClick={answer} pulse />
       </div>}
-      {call.state === 'active' && <div style={{ display: 'flex', justifyContent: 'center', gap: 42, marginTop: 34 }}>
-        <ActionButton label={t(muted ? 'Unmute' : 'Mute')} icon={muted ? '🔇' : '🎙'} color="#3b82f6" onClick={toggleMute} />
+      {call.state === 'active' && <div style={{ display: 'flex', justifyContent: 'center', gap: keypad ? 22 : 28, marginTop: keypad ? 20 : 34 }}>
+        <ActionButton label={t(muted ? 'Unmute' : 'Mute')} icon={muted ? '🔇' : '🎙'} color="#3b82f6" onClick={toggleMute} pressed={muted} />
+        <ActionButton label={t('Keypad')} icon="⌨" color="#a78bfa" onClick={toggleKeypad} pressed={keypad} />
         <ActionButton label={t('Hangup')} icon="✕" color={RED} onClick={hangup} />
       </div>}
       {call.state === 'ended' && <div style={{ color: 'var(--text-mute)', marginTop: 28 }}>{t('Call ended')}</div>}
@@ -153,10 +197,11 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
   </div>
 }
 
-function ActionButton({ label, icon, color, onClick, pulse = false }) {
+function ActionButton({ label, icon, color, onClick, pulse = false, pressed }) {
   return <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-    <button onClick={onClick} style={{ width: 68, height: 68, borderRadius: '50%', border: 'none', cursor: 'pointer',
-      fontSize: 26, background: color, color: '#fff', animation: pulse ? 'global-ringpulse 1.4s infinite' : 'none' }}>{icon}</button>
+    <button type="button" onClick={onClick} aria-label={label} aria-pressed={pressed}
+      style={{ width: 68, height: 68, borderRadius: '50%', border: 'none', cursor: 'pointer',
+        fontSize: 26, background: color, color: '#fff', animation: pulse ? 'global-ringpulse 1.4s infinite' : 'none' }}>{icon}</button>
     <span style={{ fontSize: 13, color: 'var(--text-soft)' }}>{label}</span>
   </div>
 }

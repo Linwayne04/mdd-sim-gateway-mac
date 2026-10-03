@@ -6,9 +6,9 @@ import { useI18n } from '../i18n.jsx'
 // (docker container) will handle calls/SMS/logs. Switches the global `selected` instance.
 //
 // Only lines whose physical reader is currently PRESENT are listed — a provisioned line
-// whose reader/card is unplugged is dropped from the dropdown (its config stays under SIM
+// whose reader/card is unplugged is dropped from the list (its config stays under SIM
 // Config and it reappears when the reader returns).
-export default function SimSelector({ instances = [], cards = [], devices = [], selected, setSelected, label = 'Active SIM / line' }) {
+export default function SimSelector({ instances = [], cards = [], devices = [], selected, setSelected, unreadLines = {}, label = 'Active SIM / line' }) {
   const { t, language } = useI18n()
   // A modem can expose its physical SIM through ModemManager while its optional VoWiFi
   // PC/SC bridge has no card. Treat either source as live so 4G-only calls/SMS history
@@ -39,31 +39,37 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
     if (vowifi.actual === 'off' && vowifi.support?.status === 'unsupported') parts.push(`VoWiFi ${t('cap.unsupported')}`)
     else if (i.status?.label) parts.push(`VoWiFi ${t(i.status.label)}`)
     else if (vowifi.actual) parts.push(`VoWiFi ${t(`cap.${vowifi.actual}`)}`)
-    return parts.length ? ` — ${parts.join(' · ')}` : ''
+    return parts.join(' · ')
   }
-  const numberTail = (i) => String(i.msisdn || '').replace(/\D/g, '').slice(-4)
 
   // Calls/Messages own their useful default: choose the first live line here instead of in
   // App, where a global default could leak an unrelated line into a device's SIM tab.
   const id = selected?.id
   useEffect(() => {
-    if (!id || !live.some((i) => i.id === id)) setSelected(live[0]?.id || null)
+    if (!id || !live.some((i) => String(i.id) === String(id))) setSelected(live[0]?.id || null)
   }, [id, live.map((i) => i.id).join(',')])  // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!live.length) return null
   return (
-    <div className="card" style={{ padding: '10px 14px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
-      <span style={{ fontSize: 12, color: 'var(--text-mute)', whiteSpace: 'nowrap' }}>{t(label)}</span>
-      <select value={id || ''} onChange={(e) => setSelected(e.target.value)} style={{ flex: 1, maxWidth: 460 }}>
-        {!id && <option value="">{t('— select —')}</option>}
+    <div className="sim-picker card">
+      <span className="sim-picker-label">{t(label)}</span>
+      <div className="sim-picker-grid" role="group" aria-label={t(label)}>
         {live.map((i) => {
           const c = sourceFor(i)
-          const tail = numberTail(i)
+          const modelAndName = `${deviceName(c)} · ${lineName(i)}`
           const st = statusText(i)
-          return <option key={i.id} value={i.id}>{deviceName(c)} · {lineName(i)}{tail ? ` · ••••${tail}` : ''}{st}</option>
+          const active = String(i.id) === String(id)
+          return <button key={i.id} type="button" className={`sim-picker-item${active ? ' active' : ''}`}
+            aria-pressed={active} onClick={() => setSelected(i.id)}>
+            <span className="sim-picker-top"><strong title={modelAndName}>{modelAndName}</strong>
+              {!!unreadLines[i.id] && <i className="u-nav-dot critical" title={t('Unread messages')} aria-label={t('Unread messages')} />}</span>
+            <span className="sim-picker-bottom">
+              <span className="sim-picker-number" title={i.msisdn || ''}>{i.msisdn || '—'}</span>
+              {st && <span className="sim-picker-status" title={st}>{st}</span>}
+            </span>
+          </button>
         })}
-      </select>
-      {live.length === 1 && <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('only line')}</span>}
+      </div>
     </div>
   )
 }

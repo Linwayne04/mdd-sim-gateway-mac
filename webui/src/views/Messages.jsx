@@ -14,7 +14,7 @@ const MMS_SMIL_TYPE = 'application/smil'
 // applies (or the wait is worth explaining). 'retrieved' has full parts and needs neither.
 const MMS_PENDING_STATES = new Set(['notified', 'downloading', 'failed', 'expired'])
 
-export default function Messages({ selected, subscribe, showToast, instances, cards, devices, setSelected, initialLoading, loadErrors, refreshUnread }) {
+export default function Messages({ selected, subscribe, showToast, instances, cards, devices, setSelected, initialLoading, loadErrors, refreshUnread, unreadLines }) {
   const { t: tr } = useI18n()
   const id = selected?.id
   const [threads, setThreads] = useState([])
@@ -627,16 +627,14 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   if (loadErrors?.instances && !id) return <p className="u-error">{tr('Loading failed')}</p>
   if (!id) return (
     <div>
-      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
+      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} unreadLines={unreadLines} />
       <div style={{ color: 'var(--text-dim)' }}>{tr('Select a SIM / line to view and send messages.')}</div>
     </div>
   )
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ flexShrink: 0 }}>
-        <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
-      </div>
+    <div className="u-line-workspace">
+      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} unreadLines={unreadLines} />
       <div className={`u-messages-split ${paneOpen ? 'in-conversation' : ''}`}>
       <div className="card u-messages-list" style={{ padding: 12, overflow: 'auto', minHeight: 0 }}>
         <button className="btn btn-primary" style={{ width: '100%', marginBottom: 8 }} onClick={() => { setPeer(null); setMsgs([]); setMessagesLoading(false); setComposing(true) }}>+ {tr('New message')}</button>

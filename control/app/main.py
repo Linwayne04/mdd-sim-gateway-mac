@@ -3444,12 +3444,19 @@ def _esim_resolve_se(
 
 
 def _esim_guard_engine(name: str):
-    """Refuse LPA while a VoWiFi engine holds the card (lpac needs exclusive PC/SC)."""
+    """Refuse LPA while a VoWiFi engine holds the card (lpac needs exclusive PC/SC).
+
+    The detail is structured so the WebUI can offer "stop the blocking line and
+    retry" instead of leaving the user to guess which line holds the reader (the
+    UI's own lineRunning view can be stale right after a hotplug auto-start)."""
     inst = _find_running_by_reader(name)
     if inst is not None:
         raise HTTPException(
             409,
-            f"Line {inst.get('id')} is running on this reader — stop it before eSIM operations",
+            {"code": "engine_running",
+             "message": f"Line {inst.get('id')} is running on this reader — "
+                        "stop it before eSIM operations",
+             "instance_id": str(inst.get("id") or "")},
         )
 
 
@@ -3764,23 +3771,31 @@ async def _esim_run(
     refresh_expect_iccid: str | None = None,
 ):
     """Serialize an LPA call: engine gate + per-reader lock + lpa_busy + optional refresh."""
-    await asyncio.to_thread(_esim_guard_engine, name)
-    async with hub.reader_lock(name):
-        hub.lpa_busy[name] = True
-        try:
-            result = await coro
-            if refresh:
-                await _esim_refresh_card(
-                    name, idx, expect_iccid=refresh_expect_iccid,
-                    attempts=ESIM_CARD_REFRESH_ATTEMPTS if refresh_expect_iccid else 1)
-            return result
-        except lpa.LpaError as e:
-            raise HTTPException(400, e.user_message()) from e
-        except FileNotFoundError as e:
-            raise HTTPException(503, str(e)) from e
-        finally:
-            if not keep_busy:
-                hub.lpa_busy.pop(name, None)
+    try:
+        await asyncio.to_thread(_esim_guard_engine, name)
+        async with hub.reader_lock(name):
+            hub.lpa_busy[name] = True
+            try:
+                result = await coro
+                if refresh:
+                    await _esim_refresh_card(
+                        name, idx, expect_iccid=refresh_expect_iccid,
+                        attempts=ESIM_CARD_REFRESH_ATTEMPTS if refresh_expect_iccid else 1)
+                return result
+            except lpa.LpaError as e:
+                raise HTTPException(400, e.user_message()) from e
+            except FileNotFoundError as e:
+                raise HTTPException(503, str(e)) from e
+            finally:
+                if not keep_busy:
+                    hub.lpa_busy.pop(name, None)
+    except BaseException:
+        # The coroutine is created at the call site, before this gate runs. When the
+        # engine gate (or the reader lock) rejects the call, nothing awaits it and
+        # CPython logs "coroutine ... was never awaited" — close it on those paths.
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        raise
 
 
 @app.get("/api/cards")

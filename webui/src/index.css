@@ -417,4 +417,36 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-sidebar nav button .u-nav-dot { margin-left:auto; }
 .u-nav-dot.warning { background:#d97706; }
 .u-nav-dot.critical { background:#dc2626; }
+.sim-picker { padding:12px 14px; margin-bottom:14px; }
+.sim-picker-label { display:block; margin-bottom:9px; font-size:12px; color:var(--text-mute); }
+.sim-picker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr)); gap:9px; }
+.sim-picker-item { min-width:0; padding:10px 12px; text-align:left; cursor:pointer; border:1px solid var(--border-strong); border-radius:10px; background:var(--input-bg); color:var(--text); font:inherit; }
+.sim-picker-item:hover { border-color:var(--primary); background:var(--hover); }
+.sim-picker-item:focus-visible { outline:2px solid var(--primary); outline-offset:2px; }
+.sim-picker-item.active { border-color:var(--primary); background:var(--active); box-shadow:inset 0 0 0 1px var(--primary); }
+.sim-picker-top,.sim-picker-bottom { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; }
+.sim-picker-top { font-size:14px; }
+.sim-picker-top strong,.sim-picker-number,.sim-picker-status { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sim-picker-top .u-nav-dot { flex:none; width:8px; height:8px; }
+.sim-picker-bottom { margin-top:4px; font-size:12px; color:var(--text-dim); }
+.sim-picker-status { text-align:right; }
+.u-line-workspace { height:100%; display:grid; grid-template-columns:285px minmax(0,1fr); gap:16px; min-height:0; }
+.u-line-workspace>.sim-picker { margin:0; min-height:0; overflow:auto; }
+.u-line-workspace .sim-picker-grid { grid-template-columns:minmax(0,1fr); align-content:start; }
+.u-line-workspace>.u-messages-split { min-width:0; }
+.u-softphone-split { display:grid; grid-template-columns:minmax(320px,380px) minmax(0,1fr); grid-template-rows:minmax(0,1fr); gap:16px; min-width:0; min-height:0; }
+@media(max-width:1100px) {
+ .u-line-workspace { grid-template-columns:220px minmax(0,1fr); }
+ .u-softphone-split { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(320px,1fr); overflow:auto; }
+}
+@media(max-width:900px) {
+ .u-line-workspace .u-messages-split { grid-template-columns:minmax(0,1fr); }
+ .u-line-workspace .u-messages-split.in-conversation .u-messages-list { display:none; }
+ .u-line-workspace .u-messages-split:not(.in-conversation) .u-messages-thread { display:none; }
+ .u-line-workspace .u-messages-back { display:inline-flex; }
+}
+@media(max-width:640px) {
+ .u-line-workspace { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(0,1fr); }
+ .u-line-workspace>.sim-picker { max-height:180px; }
+}
 .u-nav-count { flex:none; margin-left:auto; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--primary); color:#fff; font-size:11px; font-weight:700; display:grid; place-items:center; }

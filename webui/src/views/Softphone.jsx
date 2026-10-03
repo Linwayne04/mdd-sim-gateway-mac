@@ -134,7 +134,7 @@ function ListenOnlyNote({ t }) {
   </div>
 }
 
-export default function Softphone({ selected, subscribe, instances, cards, devices, setSelected, showToast, initialLoading, loadErrors }) {
+export default function Softphone({ selected, subscribe, instances, cards, devices, setSelected, showToast, initialLoading, loadErrors, unreadLines }) {
   const { t } = useI18n()
   const id = selected?.id
   const [prov, setProv] = useState(null)
@@ -604,7 +604,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   if (loadErrors?.instances && !id) return <p className="u-error">{t('Loading failed')}</p>
   if (!id) return (
     <div>
-      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
+      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} unreadLines={unreadLines} />
       <div style={{ color: 'var(--text-dim)' }}>{t('Select a SIM / line to use the softphone.')}</div>
     </div>
   )
@@ -647,14 +647,12 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   ) : null
 
   return (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div className="u-line-workspace">
       {/* Persistent remote-audio sink: JsSIP writes the remote MediaStream here. autoPlay +
           a stable DOM element + unlockAudio() on the first click = reliable playback. */}
       <audio ref={audioRef} autoPlay playsInline style={{ display: 'none' }} />
-      <div style={{ flexShrink: 0 }}>
-        <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '380px 1fr', gridTemplateRows: 'minmax(0, 1fr)', gap: 16, flex: 1, minHeight: 0 }}>
+      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} unreadLines={unreadLines} />
+      <div className="u-softphone-split">
       {IncomingOverlay}
       <style>{`@keyframes ringpulse{0%{box-shadow:0 0 0 0 ${GREEN}88}70%{box-shadow:0 0 0 16px ${GREEN}00}100%{box-shadow:0 0 0 0 ${GREEN}00}}`}</style>
       {/* ---- Phone panel (Google-Voice style) ---- */}
@@ -743,7 +741,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
                   background: 'var(--surface-2, rgba(255,255,255,0.06))', border: '1px solid var(--border, rgba(255,255,255,0.12))',
                   fontSize: 20, letterSpacing: 2, textAlign: 'center', overflow: 'hidden', whiteSpace: 'nowrap',
                   direction: 'rtl', color: dtmfSeq ? 'var(--text)' : 'var(--text-mute)' }}>
-                  {dtmfSeq || 'Type or tap keys'}
+                  {dtmfSeq || t('Type or tap keys')}
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8 }}>
                   {KEYS.map(([k]) => (

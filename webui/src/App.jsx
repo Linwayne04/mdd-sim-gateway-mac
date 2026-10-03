@@ -122,7 +122,22 @@ export default function App() {
   // Unread messages across every line, for the badge on Messages. The page itself keeps the
   // per-conversation counts; this is refreshed when a message arrives and when one is read.
   const [unreadTotal, setUnreadTotal] = useState(0)
-  const loadUnread = useCallback(() => api.unreadTotal().then(r => setUnreadTotal(Number(r.total) || 0)).catch(() => {}), [])
+  const [unreadLines, setUnreadLines] = useState({})
+  const unreadRequest = useRef(0)
+  const loadUnread = useCallback(async () => {
+    const request = ++unreadRequest.current
+    try {
+      const summary = await api.unreadTotal()
+      const lines = await Promise.all((summary.lines || []).map(async id => {
+        try { return [id, Number((await api.unreadMessages(id)).total) || 0] }
+        catch { return [id, 0] }
+      }))
+      if (request === unreadRequest.current) {
+        setUnreadTotal(Number(summary.total) || 0)
+        setUnreadLines(Object.fromEntries(lines))
+      }
+    } catch {}
+  }, [])
   const [updateOpen, setUpdateOpen] = useState(false)
   const [authState, setAuthState] = useState(null)
   const wsEvents = useRef({ handlers: new Set() }); const toastTimer = useRef(null); const unifiedAvailable = useRef(false)
@@ -255,7 +270,7 @@ export default function App() {
   if (!authState) return <div className="auth-shell"><div className="auth-card"><h1>MDD Sim Gateway</h1><p>{t('Loading…')}</p></div></div>
   if (!authState.authenticated) return <AuthScreen configured={authState.configured} accountUsername={authState.username} t={t} onDone={result=>{setCsrf(result.csrf);setAuthState(s=>({...s,configured:true,authenticated:true,csrf:result.csrf}))}} />
   const sel=instances.find(i=>i.id===selected)
-  const common={devices,discovering,initialLoading,loadErrors,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,deviceTab,setDeviceTab,openUpdateDialog,setSystemMeta,refreshUnread:loadUnread}
+  const common={devices,discovering,initialLoading,loadErrors,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,deviceTab,setDeviceTab,openUpdateDialog,setSystemMeta,refreshUnread:loadUnread,unreadLines}
   const content={
     overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, calls:<Softphone {...common}/>,
     messages:<Messages {...common}/>, esim:<Esim {...common}/>, keepalive:<Keepalive {...common}/>,
