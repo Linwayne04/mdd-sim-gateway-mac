@@ -57,6 +57,9 @@ def main():
         urllib3.disable_warnings()
     except ImportError:
         requests = None
+    except Exception as e:
+        _warn(f"{event} -> {manager_url}: {type(e).__name__}")
+        return
     if requests is not None:
         try:
             r = requests.post(url, json=payload,

@@ -1,4 +1,5 @@
 import http.server
+import builtins
 import json
 import os
 import sys
@@ -67,6 +68,21 @@ class NotifyUrllibFallbackTests(unittest.TestCase):
         self.assertEqual(hit["token"], "tok123")
         self.assertEqual(hit["payload"]["event"], "call_in")
         self.assertEqual(hit["payload"]["args"], ["+456"])
+
+    def test_unexpected_import_failure_does_not_escape_to_dialplan(self):
+        original_import = builtins.__import__
+
+        def fail_requests(name, *args, **kwargs):
+            if name == "requests":
+                raise RuntimeError("broken package")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=fail_requests), \
+             patch.object(notify, "_warn") as warning:
+            self._run(["notify.py", "call_in", "+456"], {})
+        warning.assert_called_once()
+        self.assertIn("RuntimeError", warning.call_args.args[0])
+        self.assertFalse(_Recorder.hits)
 
 
 def _requests_missing():
